@@ -78,6 +78,47 @@ impl Generator {
                     self.indent -= 1;
                     self.line("}");
                 }
+                Statement::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    let condition = self.expression(condition);
+                    self.line(&format!("if ({condition}) {{"));
+                    self.indent += 1;
+                    self.statements(then_branch);
+                    self.indent -= 1;
+                    if let Some(else_branch) = else_branch {
+                        self.line("} else {");
+                        self.indent += 1;
+                        self.statements(else_branch);
+                        self.indent -= 1;
+                    }
+                    self.line("}");
+                }
+                Statement::While { condition, body } => {
+                    // 條件可能生成多個暫存敘述；放在迴圈內，continue 才會重新求值。
+                    self.line("for (;;) {");
+                    self.indent += 1;
+                    let condition = self.expression(condition);
+                    self.line(&format!("if (!({condition})) {{"));
+                    self.indent += 1;
+                    self.line("break;");
+                    self.indent -= 1;
+                    self.line("}");
+                    self.statements(body);
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                Statement::Loop(body) => {
+                    self.line("for (;;) {");
+                    self.indent += 1;
+                    self.statements(body);
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                Statement::Break => self.line("break;"),
+                Statement::Continue => self.line("continue;"),
                 Statement::Print { parts, arguments } => self.print(parts, arguments),
                 Statement::Evaluate(expression) => {
                     let value = self.expression(expression);

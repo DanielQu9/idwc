@@ -1,8 +1,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 /// 提供測試專用目錄，避免測試互相覆寫或留下編譯產物。
@@ -48,6 +49,27 @@ fn successful(command: &mut Command) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+/// 限制可信任迴圈案例的執行時間，避免條件重算或 continue 迴歸造成測試卡住。
+fn run_with_timeout(command: &mut Command) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("無法啟動測試程式");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            child.kill().unwrap();
+            let _ = child.wait_with_output();
+            panic!("迴圈案例執行逾時：{command:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// 優先使用 Clang，未安裝時改用 GCC；兩者都缺少時明確失敗。
@@ -187,7 +209,165 @@ fn generated_c_matches_rust_output() {
     }
 }
 
-/// 檢查算術失敗、求值順序与輸出時機，並用 UBSan 確認 C 沒有 UB。
+/// 比較控制流程的輸出、scope、短路條件與巢狀 break／continue。
+#[test]
+fn control_flow_matches_rust_output() {
+    let cases = [
+        include_str!("../examples/control_flow.rs"),
+        r#"fn main() {
+            if true { println!("yes"); } else { println!("no"); }
+            if false { println!("no"); }
+            if false { println!("no"); } else { println!("yes"); }
+        }"#,
+        r#"fn main() {
+            let x = 3;
+            if x == 1 { println!("one"); } else if x == 2 { println!("two"); }
+            else if x == 3 { println!("three"); } else { println!("other"); }
+            if x == 1 {} else if x == 2 {} else { println!("fallback"); }
+        }"#,
+        r#"fn main() {
+            let zero = 0;
+            if true { println!("selected"); }
+            else if 1 / zero == 0 { println!("bad"); }
+            if false { let x = 1 / zero; } else { println!("safe"); }
+            while false { let x = 1 / zero; }
+        }"#,
+        r#"fn main() {
+            let mut x = 1;
+            if true { let x = x + 1; println!("{}", x); }
+            else { let x = false; println!("{}", x); }
+            if false {} else { x += 2; }
+            println!("{}", x);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            while n * 2 < 10 { n += 1; continue; }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            while n < 3 && 6 / (3 - n) > 0 { n += 1; continue; }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut active = true;
+            let mut n = 0;
+            while active { n += 1; active = false; }
+            while false { n += 100; }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            let mut sum = 0;
+            while n < 10 {
+                n += 1;
+                if n % 2 == 0 { continue; }
+                if n == 7 { break; }
+                sum += n;
+            }
+            println!("{} {}", n, sum);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            loop { n += 1; if n < 3 { continue; } break; }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            while n < 5 { n += 1; { if n == 2 { break; } } }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut outer = 0;
+            let mut count = 0;
+            while outer < 3 {
+                outer += 1;
+                let mut inner = 0;
+                loop {
+                    inner += 1;
+                    if inner == 1 { continue; }
+                    count += 1;
+                    if inner == 3 { break; }
+                }
+                count += 10;
+            }
+            println!("{} {}", outer, count);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            loop {
+                n += 1;
+                while true { break; }
+                if n == 2 { break; }
+                continue;
+            }
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            while n < 3 {
+                let n = n + 10;
+                println!("{}", n);
+                break;
+            }
+            n = 3;
+            println!("{}", n);
+        }"#,
+        r#"fn main() {
+            let mut n = 0;
+            let mut sum = 0;
+            while n < 3 {
+                let x = n + 1;
+                sum += x;
+                n += 1;
+            }
+            println!("{}", sum);
+        }"#,
+        r#"fn main() {
+            let zero = 0;
+            if false && (1 / zero == 0) { println!("bad"); }
+            else if true || (1 / zero == 0) { println!("safe"); }
+            while false && (1 / zero == 0) { println!("bad"); }
+        }"#,
+        r##"fn main() { if true { println!("#![cfg(any())] # [] {{}}"); } }"##,
+        r#"fn main() { loop { break } println!("tail break"); }"#,
+    ];
+    let dir = TestDir::new();
+    let rust_source = dir.file("input.rs");
+    let c_source = dir.file("output.c");
+    let rust_binary = dir.file("rust-output");
+    let c_binary = dir.file("c-output");
+    for source in cases {
+        fs::write(&rust_source, source).unwrap();
+        fs::write(&c_source, idwc::transpile(source).unwrap()).unwrap();
+        successful(
+            Command::new("rustc")
+                .args([
+                    "--edition=2024",
+                    "-A",
+                    "unconditional_panic",
+                    "-C",
+                    "overflow-checks=yes",
+                ])
+                .arg(&rust_source)
+                .arg("-o")
+                .arg(&rust_binary),
+        );
+        compile_c(&c_source, &c_binary);
+        let rust_output = run_with_timeout(&mut Command::new(&rust_binary));
+        let c_output = run_with_timeout(&mut Command::new(&c_binary));
+        assert!(rust_output.status.success(), "Rust 案例：{source}");
+        assert_eq!(
+            rust_output.status.code(),
+            c_output.status.code(),
+            "案例：{source}"
+        );
+        assert_eq!(rust_output.stdout, c_output.stdout, "案例：{source}");
+        assert_eq!(rust_output.stderr, c_output.stderr, "案例：{source}");
+    }
+}
+
+/// 檢查算術失敗、求值順序與輸出時機，並用 UBSan 確認 C 沒有 UB。
 #[test]
 fn arithmetic_failures_are_checked_without_undefined_behavior() {
     let cases = [
@@ -222,6 +402,19 @@ fn arithmetic_failures_are_checked_without_undefined_behavior() {
         (
             "let zero = 0; let y = false || (1 / zero == 0);",
             "division by zero",
+        ),
+        ("let x = 2147483647; if x + 1 == 0 {}", "integer overflow"),
+        (
+            "let zero = 0; while 1 / zero > 0 { break; }",
+            "division by zero",
+        ),
+        (
+            "let mut n = 0; while 1 / (1 - n) > 0 { n += 1; continue; }",
+            "division by zero",
+        ),
+        (
+            "loop { let x = 2147483647; x + 1; break; }",
+            "integer overflow",
         ),
     ];
     let dir = TestDir::new();
@@ -265,8 +458,8 @@ fn arithmetic_failures_are_checked_without_undefined_behavior() {
                 .arg("-o")
                 .arg(&c_binary),
         );
-        let rust_output = Command::new(&rust_binary).output().unwrap();
-        let c_output = Command::new(&c_binary).output().unwrap();
+        let rust_output = run_with_timeout(&mut Command::new(&rust_binary));
+        let c_output = run_with_timeout(&mut Command::new(&c_binary));
         assert_eq!(rust_output.status.code(), Some(101), "Rust 案例：{source}");
         assert_eq!(c_output.status.code(), Some(101), "C 案例：{source}");
         assert_eq!(rust_output.stdout, b"before\n", "Rust 案例：{source}");

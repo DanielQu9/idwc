@@ -65,21 +65,46 @@ translation capabilities below distinguish completed work from planned features.
 
 ### Milestones
 
-The current version is **v0.2.0**.
+The current version is **v0.3.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
 | v0.1.0 | End-to-end Hello World translation | Completed |
 | v0.2.0 | Variables, basic types, and expressions | Completed (within the subset below) |
-| v0.3.0 | Conditionals and loops | Planned |
-| v0.4.0 | Functions and basic input/output | Planned |
+| v0.3.0 | Conditionals and loops | Completed (statement forms within the subset below) |
+| v0.4.0 | Functions, basic output, and limited typed stdin | Planned |
 | v0.5.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
+| v0.6.0 | Line input, string splitting/parsing, and basic floating-point operations | Planned |
 | v1.0.0 | Stable Rust subset, tests, and documentation | Planned |
 
 Each milestone must be independently buildable, testable, and verifiable.
 Planned features are not currently accepted by the translator.
 
-### Current release: v0.2.0
+#### Planned stdin support
+
+**v0.4.0** introduces a limited typed-input interface for whitespace-separated
+`i32` values, including multiple values on one line, cross-line input, and
+repeated reads. Its Rust-facing interface will be chosen before implementation;
+this milestone does not require full `std::io`, `String`, or `Vec` support.
+It also covers output without a newline and explicit stdout flushing for
+interactive prompts. EOF, I/O errors, invalid tokens, out-of-range numbers, and
+overlong input must have defined behavior. Integration tests will feed the same
+stdin to trusted Rust and C programs and compare results.
+
+**v0.6.0** builds on array/index bounds checks to support limited patterns using
+`String::new()`, `stdin().read_line(&mut buffer)`, `trim()`, `split_whitespace()`,
+token collection (including the `Vec<&str>` pattern), and `parse::<i32>()` /
+`parse::<f64>()`. It also targets `f64` literals, arithmetic, comparisons, and a
+limited `powi(2)` for BMI-style exercises. Buffer allocation and cleanup,
+read_line append/newline behavior, UTF-8, length limits, token lifetimes,
+index bounds, EOF, parse failures, and floating-point differences must be
+specified and tested. Accepted input/parse `.unwrap()` patterns must fail in a
+controlled way. These goals do not imply general support for `String`, `Vec`,
+iterators, generics, or borrowing.
+
+Both stages are **planned**, not supported in the current v0.3.0 release.
+
+### Current release: v0.3.0
 
 Requires Rust 1.88 or newer (edition 2024) to build the transpiler, and Clang or GCC
 to compile the generated C17 program.
@@ -101,6 +126,17 @@ clang -std=c17 /tmp/idwc-variables.c -o /tmp/idwc-variables
 # total = 18, ready = true
 # inner total = 9
 # outer total = 17
+```
+
+The control-flow example exercises `if` / `else if` / `else`, `while`, `loop`,
+`break`, and `continue`:
+
+```bash
+cargo run -- examples/control_flow.rs -o /tmp/idwc-control-flow.c
+clang -std=c17 /tmp/idwc-control-flow.c -o /tmp/idwc-control-flow
+/tmp/idwc-control-flow
+# total = 9
+# after loop = 6
 ```
 
 To use the `idwc` executable directly, run `cargo build` and then
@@ -135,6 +171,13 @@ fn main() {
   `%=`) to mutable bindings. Assignment is a statement, not a value expression.
 - Multiple statements, nested statement blocks, same-scope and nested shadowing,
   and optional empty main. Value-returning blocks are not supported.
+- Statement-form `if` / `else if` / `else` with pure `bool` conditions and
+  unit-valued branches. Only the selected branch is executed.
+- Unlabeled statement-form `while` and `loop`, including nested loops.
+  A `while` condition must be a pure `bool` expression and is re-evaluated
+  before every iteration.
+- Unlabeled `break` and `continue` inside a loop, acting on the innermost loop.
+  `break` cannot carry a value; `continue` in a `while` loop rechecks its condition.
 - Pure `i32` / `bool` expression statements with a semicolon may discard their
   result; arithmetic checks still run.
 - `println!` with a string literal and sequential `{}` placeholders for `i32`
@@ -146,17 +189,23 @@ fn main() {
   `r#type`. C keyword collisions are avoided by assigning each binding a unique
   generated name. Unicode identifier normalization is not implemented yet.
 - Captured or numbered placeholders, format specifications, named arguments,
-  embedded NUL, unsupported types/operators, control flow, functions, and other
+  embedded NUL, unsupported types/operators, functions, and other
   top-level items are rejected with an error.
 - Comments are allowed; doc comments are attributes and are rejected.
 
 Semantic validation rejects undefined or out-of-scope names, assignments to
 immutable bindings, mismatched types, and out-of-range integer literals.
+Non-boolean conditions and `break` / `continue` outside loops are also rejected.
+All branches and loop bodies are validated, including unreachable ones.
 Unsupported syntax is reported as an error rather than silently ignored.
 
-Control-flow constructs (`if` / `else`, `while`, `loop`, `break`, `continue`),
-custom functions and `return`, integer-range `for`, arrays, indexing, standard
-input, and additional integer types remain planned. Async, unsafe code, raw
+Value-producing control-flow expressions, `break` with a value, loop labels,
+`if let`, `while let`, and `match` are not supported. Custom functions and
+`return`, integer-range `for`, arrays, indexing, standard input, and additional
+integer types remain planned. Floating-point types are not supported yet;
+limited stdin is targeted for v0.4.0, with line/string input and `f64` targeted
+for v0.6.0 as described above.
+Async, unsafe code, raw
 pointers, generics/traits, closures, iterator chains, arbitrary macros, full
 `std`, complex ownership/borrowing, and Cargo dependencies in input programs
 are outside the initial supported subset.
@@ -199,6 +248,9 @@ reject immutable assignment before building the typed IR in `src/ir.rs`.
 `src/format.rs` parses the supported `println!` format. `src/codegen.rs` generates
 C from IR, using temporaries to preserve evaluation order and conditional
 statements for short-circuit operands; it does not inspect the syn AST.
+`while` is lowered to a C `for (;;)` with a condition check at the start of each
+iteration, so generated arithmetic temporaries and `continue` preserve Rust
+evaluation behavior. `loop` uses a C `for (;;)` without a condition check.
 `src/main.rs` handles arguments and file I/O. Input programs and custom macros
 are never run during translation. The only direct dependency remains `syn`.
 
@@ -210,7 +262,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 Tests cover expected C output, unsupported syntax, semantic errors, scopes,
-short-circuit behavior, CLI success/error paths,
+short-circuit behavior, branches, nested loops, `break` / `continue`, condition
+re-evaluation, CLI success/error paths,
 and compilation of trusted fixtures with both Rust and C17. Runtime comparisons
 check output bytes and exit status. End-to-end tests require `rustc` and Clang
 or GCC on `PATH` and fail explicitly if no C compiler is available. Arithmetic
@@ -218,6 +271,8 @@ failure tests also require the compiler's UndefinedBehaviorSanitizer support:
 they compile C with `-O2 -fsanitize=undefined -fno-sanitize-recover=undefined`,
 compare failure exit status and stdout against Rust with checked arithmetic,
 and check C diagnostics. Rust panic diagnostic text is intentionally not compared.
+Control-flow executables have a five-second timeout so regressions cannot leave
+the test suite stuck in an infinite loop.
 
 If your Rust code is too complicated, IdwC will politely refuse to translate it.
 

@@ -53,7 +53,6 @@ fn main() { println!("hello"); }"#,
         r#"fn main(x: i32) { println!("hello"); }"#,
         r#"fn main() -> () { println!("hello"); }"#,
         r#"fn main() { println!("hello"); return; }"#,
-        r#"fn main() { if true { println!("hello"); } }"#,
         r#"fn main() { #[cfg(any())] println!("hello"); }"#,
         r#"fn main() { #![allow(unused)] println!("hello"); }"#,
         r#"fn main() { print!("hello"); }"#,
@@ -142,9 +141,9 @@ fn rejects_semantic_errors() {
     }
 }
 
-/// v0.2.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+/// v0.3.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_2() {
+fn rejects_features_outside_v0_3() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -174,8 +173,6 @@ fn rejects_features_outside_v0_2() {
         "fn main() { let x = 1; x }",
         "fn main() { { 1 } }",
         "fn main() { 'label: {} }",
-        "fn main() { while true {} }",
-        "fn main() { loop {} }",
         "fn main() { #[allow(unused)] let x = 1; }",
         "fn main() { let x = #[cfg(any())] 1; }",
         "fn main() { let x = (#[cfg(any())] 1); }",
@@ -201,10 +198,126 @@ fn rejects_features_outside_v0_2() {
     }
 }
 
+/// 控制流程敘述可嵌套，unit 尾敘述可以省略分號。
+#[test]
+fn accepts_control_flow_statements() {
+    for source in [
+        "fn main() { if true {} }",
+        "fn main() { if true {} else if false {} else {} }",
+        "fn main() { if true { if false {} else {} } else {} }",
+        "fn main() { while false {} }",
+        "fn main() { while true {} }",
+        "fn main() { loop {} }",
+        "fn main() { loop { break } }",
+        "fn main() { loop { continue } }",
+        "fn main() { while true { if false { break; } else { continue; } } }",
+        "fn main() { loop { { loop { break; } } continue; } }",
+        include_str!("../examples/control_flow.rs"),
+    ] {
+        assert!(transpile(source).is_ok(), "應支援：{source}");
+    }
+}
+
+/// 分支與迴圈仍須檢查 bool 條件、binding scope 與跳躍的位置。
+#[test]
+fn rejects_control_flow_semantic_errors() {
+    for (source, diagnostic) in [
+        ("fn main() { if 1 {} }", "型別不符"),
+        ("fn main() { while 1 {} }", "型別不符"),
+        ("fn main() { break; }", "迴圈內"),
+        ("fn main() { continue; }", "迴圈內"),
+        ("fn main() { if false { break; } }", "迴圈內"),
+        ("fn main() { loop { break; } continue; }", "迴圈內"),
+        ("fn main() { while false { break; } break; }", "迴圈內"),
+        (
+            "fn main() { if true { let x = 1; } let y = x; }",
+            "找不到變數",
+        ),
+        (
+            "fn main() { if true { let x = 1; } else { let y = x; } }",
+            "找不到變數",
+        ),
+        (
+            "fn main() { if true { let x = 1; } else if x == 1 {} }",
+            "找不到變數",
+        ),
+        (
+            "fn main() { while false { let x = 1; } let y = x; }",
+            "找不到變數",
+        ),
+        (
+            "fn main() { loop { let x = 1; break; } let y = x; }",
+            "找不到變數",
+        ),
+        ("fn main() { while x == 1 { let x = 1; } }", "找不到變數"),
+        ("fn main() { let x = 1; if false { x = 2; } }", "不可變"),
+        (
+            "fn main() { let mut x = 1; while false { x = true; } }",
+            "型別不符",
+        ),
+        (
+            "fn main() { loop { break; } if true { continue; } }",
+            "迴圈內",
+        ),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(
+            matches!(error, TranspileError::Semantic(_)),
+            "{source}：{error}"
+        );
+        assert!(error.to_string().contains(diagnostic), "{source}：{error}");
+    }
+}
+
+/// 帶值／標籤的控制流程與不支援的 AST 必須明確拒絕，即使不會執行。
+#[test]
+fn rejects_unsupported_control_flow_forms() {
+    for source in [
+        "fn main() { let x = if true { 1 } else { 2 }; }",
+        "fn main() { let x = loop { break 1; }; }",
+        "fn main() { let x = while false {}; }",
+        "fn main() { if true { 1 } else { 2 }; }",
+        "fn main() { loop { break 1; } }",
+        "fn main() { while true { break 1; } }",
+        "fn main() { 'outer: loop { break; } }",
+        "fn main() { 'outer: while true { break; } }",
+        "fn main() { loop { break 'outer; } }",
+        "fn main() { loop { continue 'outer; } }",
+        "fn main() { if let true = true {} }",
+        "fn main() { while let true = true {} }",
+        "fn main() { while { true } {} }",
+        "fn main() { for x in 0..3 {} }",
+        "fn main() { match 1 { _ => {} } }",
+        "fn main() { if false { return; } }",
+        "fn main() { while false { return; } }",
+        "fn main() { #[cfg(any())] if true {} }",
+        "fn main() { #[cfg(any())] while true {} }",
+        "fn main() { #[cfg(any())] loop {} }",
+        "fn main() { loop { #[cfg(any())] break; } }",
+        "fn main() { loop { #[cfg(any())] continue; } }",
+        "fn main() { while false { #![allow(unused)] } }",
+        "fn main() { loop { #![allow(unused)] break; } }",
+        "fn main() { if false { let x = 1.0; } }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Unsupported(_))),
+            "應拒絕：{source}，結果：{result:?}"
+        );
+    }
+}
+
 /// Rust 語法解析失敗應與不支援的語法區分。
 #[test]
 fn reports_parse_errors() {
-    for source in ["fn main( {", "fn main() {", "fn main() { let = ; }"] {
+    for source in [
+        "fn main( {",
+        "fn main() {",
+        "fn main() { let = ; }",
+        // syn 的 Block 不接受 if 分支內的 inner attribute，因此屬於解析錯誤。
+        "fn main() { if true { #![allow(unused)] } }",
+        "fn main() { if true {} else { #![allow(unused)] } }",
+    ] {
         let error = transpile(source).unwrap_err();
         assert!(matches!(error, TranspileError::Parse(_)));
         assert!(error.to_string().contains("Rust 解析失敗"));

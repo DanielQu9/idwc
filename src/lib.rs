@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.2.0 支援 main 內的 i32、bool、變數與基本運算式，入口為 [`transpile`]。
+//! v0.3.0 支援 main 內的 i32、bool、基本運算與條件／迴圈敘述，入口為 [`transpile`]。
 
 mod codegen;
 mod format;
@@ -39,7 +39,7 @@ impl std::error::Error for TranspileError {
     }
 }
 
-/// 將單一 main 內的 i32／bool 基本語法轉成 C17 原始碼。
+/// 將單一 main 內的 i32／bool、基本運算與控制流程轉成 C17 原始碼。
 /// 不會執行輸入原始碼或展開使用者巨集。
 ///
 /// # Errors

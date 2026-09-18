@@ -19,6 +19,7 @@ struct Binding {
 struct Analyzer {
     scopes: Vec<HashMap<String, Binding>>,
     next_id: usize,
+    loop_depth: usize,
 }
 
 /// 分析 main 主體，產生不再依賴 Rust 名稱解析的 IR。
@@ -26,6 +27,7 @@ pub(crate) fn analyze(block: &syn::Block) -> Result<Program, TranspileError> {
     let mut analyzer = Analyzer {
         scopes: Vec::new(),
         next_id: 0,
+        loop_depth: 0,
     };
     Ok(Program {
         statements: analyzer.block(block)?,
@@ -55,6 +57,31 @@ impl Analyzer {
                 if block.attrs.is_empty() && block.label.is_none() =>
             {
                 Ok(Statement::Block(self.block(&block.block)?))
+            }
+            Stmt::Expr(Expr::If(branch), _) if branch.attrs.is_empty() => self.branch(branch),
+            Stmt::Expr(Expr::While(while_loop), _)
+                if while_loop.attrs.is_empty() && while_loop.label.is_none() =>
+            {
+                let condition = self.condition(&while_loop.cond)?;
+                let body = self.loop_body(&while_loop.body)?;
+                Ok(Statement::While { condition, body })
+            }
+            Stmt::Expr(Expr::Loop(loop_expr), _)
+                if loop_expr.attrs.is_empty() && loop_expr.label.is_none() =>
+            {
+                Ok(Statement::Loop(self.loop_body(&loop_expr.body)?))
+            }
+            Stmt::Expr(Expr::Break(jump), _)
+                if jump.attrs.is_empty() && jump.label.is_none() && jump.expr.is_none() =>
+            {
+                self.check_loop_context()?;
+                Ok(Statement::Break)
+            }
+            Stmt::Expr(Expr::Continue(jump), _)
+                if jump.attrs.is_empty() && jump.label.is_none() =>
+            {
+                self.check_loop_context()?;
+                Ok(Statement::Continue)
             }
             Stmt::Expr(Expr::Assign(assign), _) if assign.attrs.is_empty() => {
                 let binding = self.assignment_target(&assign.left)?;
@@ -94,6 +121,56 @@ impl Analyzer {
                 "不接受此敘述、item、pattern 或屬性",
             )),
         }
+    }
+
+    /// 條件只接受純 bool 運算式，不使用 C 的整數 truthiness。
+    fn condition(&self, expr: &Expr) -> Result<Expression, TranspileError> {
+        let condition = self.expression(expr)?;
+        same_type(Type::Bool, condition.ty)?;
+        Ok(condition)
+    }
+
+    /// 分別分析分支 scope；else if 延後到 else 路徑才求值。
+    fn branch(&mut self, branch: &syn::ExprIf) -> Result<Statement, TranspileError> {
+        let condition = self.condition(&branch.cond)?;
+        let then_branch = self.block(&branch.then_branch)?;
+        let else_branch = match &branch.else_branch {
+            None => None,
+            Some((_, expr)) => match expr.as_ref() {
+                Expr::Block(block) if block.attrs.is_empty() && block.label.is_none() => {
+                    Some(self.block(&block.block)?)
+                }
+                Expr::If(branch) if branch.attrs.is_empty() => Some(vec![self.branch(branch)?]),
+                _ => {
+                    return Err(TranspileError::Unsupported(
+                        "else 僅接受無屬性的區塊或 else if",
+                    ));
+                }
+            },
+        };
+        Ok(Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        })
+    }
+
+    /// 在迴圈主體內允許跳躍；無論分析成功或失敗都恢復外層深度。
+    fn loop_body(&mut self, block: &syn::Block) -> Result<Vec<Statement>, TranspileError> {
+        self.loop_depth += 1;
+        let result = self.block(block);
+        self.loop_depth -= 1;
+        result
+    }
+
+    /// 拒絕迴圈之外的 break／continue，包含不可到達的分支。
+    fn check_loop_context(&self) -> Result<(), TranspileError> {
+        if self.loop_depth == 0 {
+            return Err(TranspileError::Semantic(
+                "break／continue 僅允許在迴圈內".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// 只有帶分號的純值運算式可捨棄結果。

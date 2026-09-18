@@ -22,6 +22,21 @@ pub(crate) enum Statement {
         value: Expression,
     },
     Block(Vec<Statement>),
+    /// 所有分支均為 unit 敘述；else if 表示為 else 分支中的 If。
+    If {
+        condition: Expression,
+        then_branch: Vec<Statement>,
+        else_branch: Option<Vec<Statement>>,
+    },
+    /// condition 必須在每次迭代（包含 continue 後）重新求值。
+    While {
+        condition: Expression,
+        body: Vec<Statement>,
+    },
+    Loop(Vec<Statement>),
+    /// 無標籤跳躍；只作用於最內層迴圈。
+    Break,
+    Continue,
     Print {
         parts: Vec<PrintPart>,
         arguments: Vec<Expression>,
