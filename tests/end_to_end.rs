@@ -95,6 +95,73 @@ fn generated_c_matches_rust_output() {
         r#"fn main() { println!("??/ ??= ??' ??( ??) ??! ??< ??> ??-"); }"#,
         r#"fn main() { println!("line\
             continuation"); }"#,
+        include_str!("../examples/variables.rs"),
+        r#"fn main() {
+            let mut x: i32 = 7;
+            x += 3; x -= 2; x *= 4; x /= 3; x %= 7;
+            println!("{}", x);
+            x = 99;
+            println!("{}", x);
+        }"#,
+        r#"fn main() {
+            let x = 1;
+            let x = x + 1;
+            { let x = x * 3; println!("inner {}", x); }
+            println!("outer {}", x);
+            let x = true;
+            println!("shadow {}", x);
+        }"#,
+        r#"fn main() {
+            let mut x = 1;
+            { x = 2; { let mut x = 3; x += 4; println!("{}", x); } }
+            println!("{}", x);
+        }"#,
+        r#"fn main() {
+            let x = 2 + 3 * 4;
+            let y = (2 + 3) * 4;
+            println!("{} {} {}", x, y, -(x - y));
+        }"#,
+        r#"fn main() {
+            let x = -7;
+            println!("{} {} {} {}", x / 3, x % 3, 7 / -3, 7 % -3);
+        }"#,
+        r#"fn main() {
+            let min: i32 = -(2147483648);
+            let max = 2_147_483_647i32;
+            println!("{} {} {}", min, max, min + max);
+        }"#,
+        r#"fn main() {
+            let a = 3;
+            let b = 4;
+            let t = true;
+            let f = false;
+            println!("{} {} {} {} {} {} {} {}", a < b, a <= b, a > b, a >= b,
+                a == b, a != b, t == f, !f);
+            println!("{} {}", t && (a < b), f || (a == 3));
+        }"#,
+        r#"fn main() {
+            let zero = 0;
+            let max = 2147483647;
+            println!("{} {}", false && (1 / zero == 0), true || (max + 1 == 0));
+            println!("{}", (true || (1 / zero == 0)) && (false || true));
+        }"#,
+        r#"fn main() {
+            let int = 1;
+            let printf = 2;
+            let r#return = 3;
+            let idwc_v0 = 4;
+            let idwc_t0 = 5;
+            let r#type = false;
+            println!("{} {} {} {} {} {}", int, printf, r#return, idwc_v0, idwc_t0, r#type);
+        }"#,
+        r#"fn main() {
+            let r#value = 12;
+            println!("{{{}}} {} 100% %n 中文", value, !true);
+        }"#,
+        "fn main() {}",
+        "fn main() { let _unused = 42; { let _unused = true; } }",
+        "fn main() { let mut _unused = 1; _unused = 2; _unused += 3; }",
+        r#"fn main() { let x = 2; (x + 1) * 3; println!("ok"); }"#,
     ];
     let dir = TestDir::new();
     let rust_source = dir.file("input.rs");
@@ -117,6 +184,98 @@ fn generated_c_matches_rust_output() {
         assert_eq!(rust_output.status.code(), c_output.status.code());
         assert_eq!(rust_output.stdout, c_output.stdout, "案例：{source}");
         assert_eq!(rust_output.stderr, c_output.stderr, "案例：{source}");
+    }
+}
+
+/// 檢查算術失敗、求值順序与輸出時機，並用 UBSan 確認 C 沒有 UB。
+#[test]
+fn arithmetic_failures_are_checked_without_undefined_behavior() {
+    let cases = [
+        ("let x = 2147483647; let y = x + 1;", "integer overflow"),
+        ("let x = -2147483648; let y = x - 1;", "integer overflow"),
+        ("let x = 2147483647; let y = x * 2;", "integer overflow"),
+        ("let x = -2147483648; let y = -x;", "integer overflow"),
+        ("let x = -2147483648; let y = x / -1;", "integer overflow"),
+        ("let x = -2147483648; let y = x % -1;", "integer overflow"),
+        ("let zero = 0; let y = 1 / zero;", "division by zero"),
+        ("let zero = 0; let y = 1 % zero;", "division by zero"),
+        ("let mut x = 2147483647; x += 1;", "integer overflow"),
+        ("let x = 2147483647; x + 1;", "integer overflow"),
+        // 左 operand 與第一個 println! 引數應先失敗，且不先輸出 prefix。
+        (
+            "let x = 2147483647; let zero = 0; let y = (x + 1) + (1 / zero);",
+            "integer overflow",
+        ),
+        (
+            r#"let x = 2147483647; let zero = 0; println!("prefix {} {}", x + 1, 1 / zero);"#,
+            "integer overflow",
+        ),
+        (
+            r#"let x = 2147483647; let zero = 0; println!("prefix {} {}", 1 / zero, x + 1);"#,
+            "division by zero",
+        ),
+        // 非短路的右 operand 必須確實求值。
+        (
+            "let zero = 0; let y = true && (1 / zero == 0);",
+            "division by zero",
+        ),
+        (
+            "let zero = 0; let y = false || (1 / zero == 0);",
+            "division by zero",
+        ),
+    ];
+    let dir = TestDir::new();
+    let rust_source = dir.file("input.rs");
+    let c_source = dir.file("output.c");
+    let rust_binary = dir.file("rust-output");
+    let c_binary = dir.file("c-output");
+    for (body, diagnostic) in cases {
+        let source = format!("fn main() {{ println!(\"before\"); {body} println!(\"after\"); }}");
+        fs::write(&rust_source, &source).unwrap();
+        fs::write(&c_source, idwc::transpile(&source).unwrap()).unwrap();
+        // 關閉 rustc 的常數運算 lint，才能執行可信任的失敗案例。
+        successful(
+            Command::new("rustc")
+                .args([
+                    "--edition=2024",
+                    "-A",
+                    "arithmetic_overflow",
+                    "-A",
+                    "unconditional_panic",
+                    "-C",
+                    "overflow-checks=yes",
+                ])
+                .arg(&rust_source)
+                .arg("-o")
+                .arg(&rust_binary),
+        );
+        successful(
+            Command::new(c_compiler())
+                .args([
+                    "-std=c17",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic-errors",
+                    "-O2",
+                    "-fsanitize=undefined",
+                    "-fno-sanitize-recover=undefined",
+                ])
+                .arg(&c_source)
+                .arg("-o")
+                .arg(&c_binary),
+        );
+        let rust_output = Command::new(&rust_binary).output().unwrap();
+        let c_output = Command::new(&c_binary).output().unwrap();
+        assert_eq!(rust_output.status.code(), Some(101), "Rust 案例：{source}");
+        assert_eq!(c_output.status.code(), Some(101), "C 案例：{source}");
+        assert_eq!(rust_output.stdout, b"before\n", "Rust 案例：{source}");
+        assert_eq!(c_output.stdout, rust_output.stdout, "C 案例：{source}");
+        assert_eq!(
+            String::from_utf8_lossy(&c_output.stderr),
+            format!("idwc: {diagnostic}\n"),
+            "C 案例：{source}"
+        );
     }
 }
 
@@ -148,7 +307,7 @@ fn cli_reports_errors_without_overwriting_output() {
     let dir = TestDir::new();
     let input = dir.file("invalid.rs");
     let output = dir.file("output.c");
-    fs::write(&input, "fn main() {}").unwrap();
+    fs::write(&input, "fn main() { return; }").unwrap();
     fs::write(&output, "existing output").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
         .arg(&input)

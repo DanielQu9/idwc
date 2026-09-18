@@ -1,19 +1,23 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.1.0 僅接受 main 內的一次字串 println!，入口為 [`transpile`]。
+//! v0.2.0 支援 main 內的 i32、bool、變數與基本運算式，入口為 [`transpile`]。
 
 mod codegen;
+mod format;
 mod ir;
+mod semantic;
 mod validate;
 
 use std::fmt;
 
-/// 區分 Rust 解析失敗與超出目前支援範圍的語法。
+/// 區分 Rust 解析失敗、未支援語法與語意錯誤。
 #[derive(Debug)]
 pub enum TranspileError {
     /// 原始碼無法解析成 Rust AST。
     Parse(syn::Error),
-    /// 語法或字串內容超出 v0.1.0 的支援範圍。
+    /// 語法或字串內容超出目前的支援範圍。
     Unsupported(&'static str),
+    /// 名稱解析、型別、可變性或整數字面量錯誤。
+    Semantic(String),
 }
 
 impl fmt::Display for TranspileError {
@@ -21,6 +25,7 @@ impl fmt::Display for TranspileError {
         match self {
             Self::Parse(error) => write!(f, "Rust 解析失敗：{error}"),
             Self::Unsupported(reason) => write!(f, "不支援的語法：{reason}"),
+            Self::Semantic(reason) => write!(f, "語意錯誤：{reason}"),
         }
     }
 }
@@ -29,16 +34,16 @@ impl std::error::Error for TranspileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(error) => Some(error),
-            Self::Unsupported(_) => None,
+            Self::Unsupported(_) | Self::Semantic(_) => None,
         }
     }
 }
 
-/// 將單一 main 與單一字串 println! 轉成 C17 原始碼。
+/// 將單一 main 內的 i32／bool 基本語法轉成 C17 原始碼。
 /// 不會執行輸入原始碼或展開使用者巨集。
 ///
 /// # Errors
-/// 無效 Rust、未支援 AST、格式參數或內嵌 NUL 字元會回傳錯誤。
+/// 無效 Rust、未支援 AST／格式、語意錯誤或內嵌 NUL 會回傳錯誤。
 ///
 /// # Examples
 /// ```

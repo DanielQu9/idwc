@@ -52,11 +52,7 @@ fn main() { println!("hello"); }"#,
         r#"fn main() where i32: Copy { println!("hello"); }"#,
         r#"fn main(x: i32) { println!("hello"); }"#,
         r#"fn main() -> () { println!("hello"); }"#,
-        "fn main() {}",
-        r#"fn main() { println!("a"); println!("b"); }"#,
-        r#"fn main() { let x = 1; println!("hello"); }"#,
         r#"fn main() { println!("hello"); return; }"#,
-        r#"fn main() { { println!("hello"); } }"#,
         r#"fn main() { if true { println!("hello"); } }"#,
         r#"fn main() { #[cfg(any())] println!("hello"); }"#,
         r#"fn main() { #![allow(unused)] println!("hello"); }"#,
@@ -68,7 +64,6 @@ fn main() { println!("hello"); }"#,
         "fn main() { println!(123); }",
         r#"fn main() { println!(b"hello"); }"#,
         r#"fn main() { println!(concat!("hello")); }"#,
-        r#"fn main() { println!("{}", 1); }"#,
         r#"fn main() { println!("hello", "other"); }"#,
         r#"fn main() { println!("hello",,); }"#,
         r#"fn main() { println!("hello"suffix); }"#,
@@ -84,6 +79,124 @@ fn main() { println!("hello"); }"#,
         assert!(
             matches!(transpile(source), Err(TranspileError::Unsupported(_))),
             "應拒絕未支援的原始碼：{source}"
+        );
+    }
+}
+
+/// 基本語法、空主體、區塊與型別推導皆應產生可編譯 IR。
+#[test]
+fn accepts_variables_types_and_expressions() {
+    for source in [
+        "fn main() {}",
+        r#"fn main() { println!("a"); println!("b"); }"#,
+        "fn main() { let x = 1; let y: bool = x == 1; }",
+        "fn main() { let mut x: i32 = 1; x = 2; x += 1; x -= 1; x *= 2; x /= 2; x %= 2; }",
+        "fn main() { let mut x = true; x = !x; }",
+        "fn main() { let x = 1; { let x = x + 1; } let x = false; }",
+        "fn main() { let x = 0xffi32 + 0b1010 + 0o10 + 1_000; }",
+        "fn main() { let x = -2147483648i32; let y = -(2147483648); }",
+        "fn main() { let x = 2; (x + 1) * 3; }",
+        r#"fn main() { let r#int = 1; println!("{}", int); }"#,
+        r#"fn main() { println!("{} {}", 1, true,); }"#,
+        include_str!("../examples/variables.rs"),
+    ] {
+        assert!(transpile(source).is_ok(), "應支援：{source}");
+    }
+}
+
+/// 名稱、scope、可變性與型別錯誤不可交由 C 隱式轉換或錯誤解析。
+#[test]
+fn rejects_semantic_errors() {
+    for (source, diagnostic) in [
+        ("fn main() { let x = y; }", "找不到變數"),
+        ("fn main() { let x = x; }", "找不到變數"),
+        ("fn main() { x = 1; }", "找不到變數"),
+        ("fn main() { let x = 1; x = 2; }", "不可變"),
+        ("fn main() { let x = 1; x += 2; }", "不可變"),
+        ("fn main() { let mut x = 1; let x = x; x = 2; }", "不可變"),
+        ("fn main() { { let x = 1; } let y = x; }", "找不到變數"),
+        ("fn main() { let x: i32 = true; }", "型別不符"),
+        ("fn main() { let x: bool = 1; }", "型別不符"),
+        ("fn main() { let mut x = true; x = 1; }", "型別不符"),
+        ("fn main() { let mut x = true; x += true; }", "型別不符"),
+        ("fn main() { let x = 1 + true; }", "型別不符"),
+        ("fn main() { let x = true + false; }", "型別不符"),
+        ("fn main() { let x = 1 == true; }", "型別不符"),
+        ("fn main() { let x = 1 && 2; }", "型別不符"),
+        ("fn main() { let x = !1; }", "型別不符"),
+        ("fn main() { let x = -true; }", "型別不符"),
+        ("fn main() { let x = 2147483648; }", "超出 i32"),
+        ("fn main() { let x = -2147483649; }", "超出 i32"),
+        ("fn main() { let x = 18446744073709551615; }", "超出 i32"),
+        (
+            "fn main() { let x = 99999999999999999999999999999; }",
+            "超出 i32",
+        ),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(
+            matches!(error, TranspileError::Semantic(_)),
+            "{source}：{error}"
+        );
+        assert!(error.to_string().contains(diagnostic), "{source}：{error}");
+    }
+}
+
+/// v0.2.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+#[test]
+fn rejects_features_outside_v0_2() {
+    for source in [
+        "fn main() { let x; }",
+        "fn main() { let x: i32; }",
+        "fn main() { let _ = 1; }",
+        "fn main() { let (x, y) = (1, 2); }",
+        "fn main() { let ref x = 1; }",
+        "fn main() { let x: i64 = 1; }",
+        "fn main() { let x: &i32 = &1; }",
+        "fn main() { let x: std::primitive::i32 = 1; }",
+        "fn main() { let x = 1u32; }",
+        "fn main() { let x = 1.0; }",
+        "fn main() { let x = 'a'; }",
+        r#"fn main() { let x = "text"; }"#,
+        "fn main() { let x = [1, 2]; }",
+        "fn main() { let x = 1 << 2; }",
+        "fn main() { let x = 1 & 2; }",
+        "fn main() { let x = 1 | 2; }",
+        "fn main() { let x = 1 ^ 2; }",
+        "fn main() { let x = 1 as bool; }",
+        "fn main() { let x = f(); }",
+        "fn main() { let x = 1.abs(); }",
+        "fn main() { let x = { 1 }; }",
+        "fn main() { let mut x = 1; let y = (x = 2); }",
+        "fn main() { let mut x = 1; x |= 2; }",
+        "fn main() { let mut x = 1; x <<= 2; }",
+        "fn main() { let mut x = [1]; x[0] = 2; }",
+        "fn main() { let x = 1; x }",
+        "fn main() { { 1 } }",
+        "fn main() { 'label: {} }",
+        "fn main() { while true {} }",
+        "fn main() { loop {} }",
+        "fn main() { #[allow(unused)] let x = 1; }",
+        "fn main() { let x = #[cfg(any())] 1; }",
+        "fn main() { let x = (#[cfg(any())] 1); }",
+        "fn main() { let x = 1; let y = #[cfg(any())] x; }",
+        "fn main() { let x = 1; let y = x::<i32>; }",
+        "fn main() { let x = module::value; }",
+        "fn main() { let x = 1; let y = &x; }",
+        "fn main() { let x = 1; let y = *x; }",
+        "fn main() { let 中文 = 1; }",
+        r#"fn main() { println!("{x}"); }"#,
+        r#"fn main() { println!("{0}", 1); }"#,
+        r#"fn main() { println!("{:?}", 1); }"#,
+        r#"fn main() { println!("{:04}", 1); }"#,
+        r#"fn main() { println!("{}", "text"); }"#,
+        r#"fn main() { println!("{}", (1, 2)); }"#,
+        r#"fn main() { println!("{}", 1, 2); }"#,
+        r#"fn main() { let x = 1; println!("{}", x = 2); }"#,
+    ] {
+        assert!(
+            matches!(transpile(source), Err(TranspileError::Unsupported(_))),
+            "應拒絕：{source}"
         );
     }
 }
