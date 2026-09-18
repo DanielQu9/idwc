@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BinaryOp, Expression, ExpressionKind, PrintPart, Program, Statement, Type, UnaryOp,
+    BinaryOp, Expression, ExpressionKind, Function, PrintPart, Program, Statement, Type, UnaryOp,
 };
 
 /// 從已驗證 IR 生成僅依賴 C 標準函式庫的 C17 原始碼。
@@ -12,7 +12,27 @@ pub(crate) fn generate(program: &Program) -> String {
         next_temp: 0,
         typed: false,
         helpers: BTreeSet::new(),
+        in_main: false,
     };
+    let mut prototypes = String::new();
+    let mut functions = String::new();
+    for function in &program.functions {
+        generator.typed = true;
+        let signature = function_signature(function);
+        prototypes.push_str(&format!("{signature};\n"));
+        functions.push_str(&format!("{signature} {{\n"));
+        for parameter in &function.parameters {
+            generator.line(&format!("(void)idwc_v{};", parameter.id));
+        }
+        generator.statements(&function.statements);
+        if function.return_type == Type::Unit {
+            generator.line("return;");
+        }
+        functions.push_str(&generator.body);
+        functions.push_str("}\n\n");
+        generator.body.clear();
+    }
+    generator.in_main = true;
     generator.statements(&program.statements);
     generator.line("return 0;");
     let mut output = String::from("#include <stdio.h>\n");
@@ -21,8 +41,16 @@ pub(crate) fn generate(program: &Program) -> String {
             "#include <stdbool.h>\n#include <stdint.h>\n#include <inttypes.h>\n#include <stdlib.h>\n",
         );
     }
+    if !generator.helpers.is_empty() {
+        output.push_str("#include <signal.h>\n");
+    }
     output.push('\n');
     output.push_str(&runtime_helpers(&generator.helpers));
+    if !prototypes.is_empty() {
+        output.push_str(&prototypes);
+        output.push('\n');
+        output.push_str(&functions);
+    }
     output.push_str("int main(void) {\n");
     output.push_str(&generator.body);
     output.push_str("}\n");
@@ -36,6 +64,7 @@ struct Generator {
     next_temp: usize,
     typed: bool,
     helpers: BTreeSet<&'static str>,
+    in_main: bool,
 }
 
 impl Generator {
@@ -119,7 +148,21 @@ impl Generator {
                 }
                 Statement::Break => self.line("break;"),
                 Statement::Continue => self.line("continue;"),
-                Statement::Print { parts, arguments } => self.print(parts, arguments),
+                Statement::Print {
+                    parts,
+                    arguments,
+                    newline,
+                } => self.print(parts, arguments, *newline),
+                Statement::Return(expression) => {
+                    if let Some(expression) = expression {
+                        let value = self.expression(expression);
+                        if expression.ty != Type::Unit {
+                            self.line(&format!("return {value};"));
+                            continue;
+                        }
+                    }
+                    self.line(if self.in_main { "return 0;" } else { "return;" });
+                }
                 Statement::Evaluate(expression) => {
                     let value = self.expression(expression);
                     self.line(&format!("(void)({value});"));
@@ -129,7 +172,7 @@ impl Generator {
     }
 
     /// 輸出前先依序求值所有參數，避免參數失敗時先寫出部分文字。
-    fn print(&mut self, parts: &[PrintPart], arguments: &[Expression]) {
+    fn print(&mut self, parts: &[PrintPart], arguments: &[Expression], newline: bool) {
         if arguments.is_empty() {
             // 無參數格式只含文字，維持 v0.1.0 的可讀 puts 輸出。
             let mut text = String::new();
@@ -138,7 +181,11 @@ impl Generator {
                     text.push_str(part);
                 }
             }
-            self.line(&format!("puts(\"{}\");", escape_string(&text)));
+            if newline {
+                self.line(&format!("puts(\"{}\");", escape_string(&text)));
+            } else {
+                self.line(&format!("fputs(\"{}\", stdout);", escape_string(&text)));
+            }
             return;
         }
         let mut values = Vec::new();
@@ -159,17 +206,45 @@ impl Generator {
                         "fputs({} ? \"true\" : \"false\", stdout);",
                         values[*index]
                     )),
+                    Type::Unit => unreachable!("格式參數已驗證為 i32 或 bool"),
                 },
                 _ => {}
             }
         }
-        self.line("putchar('\\n');");
+        if newline {
+            self.line("putchar('\\n');");
+        }
     }
 
     /// 運算式產生原子值或已求值的暫存值；左右 operand 依序求值。
     fn expression(&mut self, expression: &Expression) -> String {
         self.typed = true;
         let value = match &expression.kind {
+            ExpressionKind::Unit => return "0".into(),
+            ExpressionKind::ReadI32 => {
+                self.helpers.insert("read");
+                "idwc_read_i32()".into()
+            }
+            ExpressionKind::FlushStdout => {
+                self.helpers.insert("flush");
+                self.line("idwc_flush_stdout();");
+                return "0".into();
+            }
+            ExpressionKind::Call(id, arguments) => {
+                let mut values = Vec::new();
+                for argument in arguments {
+                    let value = self.expression(argument);
+                    let temp = self.temp_name();
+                    self.line(&format!("const {} {temp} = {value};", c_type(argument.ty)));
+                    values.push(temp);
+                }
+                let call = format!("idwc_f{id}({})", values.join(", "));
+                if expression.ty == Type::Unit {
+                    self.line(&format!("{call};"));
+                    return "0".into();
+                }
+                call
+            }
             ExpressionKind::Integer(value) => {
                 return if *value == i32::MIN {
                     "INT32_MIN".into()
@@ -256,7 +331,29 @@ fn c_type(ty: Type) -> &'static str {
     match ty {
         Type::I32 => "int32_t",
         Type::Bool => "bool",
+        Type::Unit => "void",
     }
+}
+
+fn function_signature(function: &Function) -> String {
+    let parameters = if function.parameters.is_empty() {
+        "void".into()
+    } else {
+        function
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let qualifier = if parameter.mutable { "" } else { "const " };
+                format!("{qualifier}{} idwc_v{}", c_type(parameter.ty), parameter.id)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{} idwc_f{}({parameters})",
+        c_type(function.return_type),
+        function.id
+    )
 }
 
 /// 只生成實際使用的檢查函式；先提升至 int64_t，避免 C signed overflow。
@@ -265,7 +362,7 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
         return String::new();
     }
     let mut output = String::from(
-        "static void idwc_fail(const char *message) {\n    fflush(stdout);\n    fputs(message, stderr);\n    exit(101);\n}\n\n",
+        "static void idwc_fail(const char *message) {\n#ifdef SIGPIPE\n    signal(SIGPIPE, SIG_IGN);\n#endif\n    fflush(stdout);\n    fputs(message, stderr);\n    exit(101);\n}\n\n",
     );
     if helpers
         .iter()
@@ -277,6 +374,10 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     }
     for helper in helpers {
         match *helper {
+            "flush" => output.push_str(
+                "static void idwc_flush_stdout(void) {\n#ifdef SIGPIPE\n    signal(SIGPIPE, SIG_IGN);\n#endif\n    if (fflush(stdout) == EOF || ferror(stdout)) {\n        idwc_fail(\"idwc: stdout flush error\\n\");\n    }\n}\n\n",
+            ),
+            "read" => output.push_str(INPUT_HELPER),
             "neg" => output.push_str(
                 "static int32_t idwc_neg(int32_t value) {\n    return idwc_checked(-(int64_t)value);\n}\n\n",
             ),
@@ -301,6 +402,64 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     }
     output
 }
+
+const INPUT_HELPER: &str = r#"static bool idwc_space(int byte) {
+    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r'
+        || byte == '\v' || byte == '\f';
+}
+
+static int32_t idwc_read_i32(void) {
+    unsigned char token[128];
+    size_t length = 0;
+    int byte;
+    do {
+        byte = fgetc(stdin);
+        if (byte == EOF) {
+            idwc_fail(ferror(stdin) ? "idwc: stdin I/O error\n" : "idwc: unexpected EOF\n");
+        }
+    } while (idwc_space(byte));
+    for (;;) {
+        if (length == sizeof token) {
+            idwc_fail("idwc: input token too long\n");
+        }
+        token[length++] = (unsigned char)byte;
+        byte = fgetc(stdin);
+        if (byte == EOF) {
+            if (ferror(stdin)) {
+                idwc_fail("idwc: stdin I/O error\n");
+            }
+            break;
+        }
+        if (idwc_space(byte)) {
+            break;
+        }
+    }
+    bool negative = token[0] == '-';
+    size_t start = (negative || token[0] == '+') ? 1 : 0;
+    if (start == length) {
+        idwc_fail("idwc: invalid integer\n");
+    }
+    for (size_t i = start; i < length; ++i) {
+        if (token[i] < '0' || token[i] > '9') {
+            idwc_fail("idwc: invalid integer\n");
+        }
+    }
+    uint64_t limit = negative ? UINT64_C(2147483648) : UINT64_C(2147483647);
+    uint64_t value = 0;
+    for (size_t i = start; i < length; ++i) {
+        uint64_t digit = token[i] - '0';
+        if (value > (limit - digit) / 10) {
+            idwc_fail("idwc: integer out of range\n");
+        }
+        value = value * 10 + digit;
+    }
+    if (negative && value == UINT64_C(2147483648)) {
+        return INT32_MIN;
+    }
+    return negative ? -(int32_t)value : (int32_t)value;
+}
+
+"#;
 
 /// 以 UTF-8 位元組編碼 C 字串；固定三位八進位避免吞掉後續數字。
 fn escape_string(value: &str) -> String {

@@ -2,10 +2,12 @@ use syn::{Expr, LitStr, Token, parse::Parser};
 
 use crate::{TranspileError, ir::PrintPart};
 
-/// 解析 println! 的字串與參數，不展開或執行巨集。
+/// 解析 print!／println! 的字串與參數，不展開或執行巨集。
 pub(crate) fn parse(mac: &syn::Macro) -> Result<(Vec<PrintPart>, Vec<Expr>), TranspileError> {
-    if !mac.path.is_ident("println") {
-        return Err(TranspileError::Unsupported("僅接受未限定路徑的 println!"));
+    if !mac.path.is_ident("println") && !mac.path.is_ident("print") {
+        return Err(TranspileError::Unsupported(
+            "僅接受未限定路徑的 print!／println!",
+        ));
     }
     let parser = |input: syn::parse::ParseStream<'_>| {
         let literal: LitStr = input.parse()?;
@@ -20,7 +22,7 @@ pub(crate) fn parse(mac: &syn::Macro) -> Result<(Vec<PrintPart>, Vec<Expr>), Tra
         Ok((literal, arguments))
     };
     let (literal, arguments) = parser.parse2(mac.tokens.clone()).map_err(|_| {
-        TranspileError::Unsupported("println! 必須以字串字面量開頭，參數以逗號分隔")
+        TranspileError::Unsupported("print!／println! 必須以字串字面量開頭，參數以逗號分隔")
     })?;
     if !literal.suffix().is_empty() {
         return Err(TranspileError::Unsupported("字串字面量不接受後綴"));

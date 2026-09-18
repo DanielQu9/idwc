@@ -1,6 +1,22 @@
-/// 通過語法與語意驗證的 main 主體。
+/// 通過語法與語意驗證的 main 主體及輔助函式。
 pub(crate) struct Program {
     pub(crate) statements: Vec<Statement>,
+    pub(crate) functions: Vec<Function>,
+}
+
+/// 已驗證的輔助函式；函式名稱以獨立 ID 表示。
+pub(crate) struct Function {
+    pub(crate) id: usize,
+    pub(crate) parameters: Vec<Parameter>,
+    pub(crate) return_type: Type,
+    pub(crate) statements: Vec<Statement>,
+}
+
+/// 函式參數的 binding 與值型別。
+pub(crate) struct Parameter {
+    pub(crate) id: usize,
+    pub(crate) ty: Type,
+    pub(crate) mutable: bool,
 }
 
 /// 此版本支援的值型別；所有整數皆固定為 i32。
@@ -8,9 +24,10 @@ pub(crate) struct Program {
 pub(crate) enum Type {
     I32,
     Bool,
+    Unit,
 }
 
-/// 已解析 binding 與型別的敘述；id 在整個程式內唯一。
+/// 已解析 binding 與型別的敘述；binding id 在所屬函式內唯一。
 pub(crate) enum Statement {
     Let {
         id: usize,
@@ -40,12 +57,14 @@ pub(crate) enum Statement {
     Print {
         parts: Vec<PrintPart>,
         arguments: Vec<Expression>,
+        newline: bool,
     },
+    Return(Option<Expression>),
     /// 帶分號且捨棄值的運算式，仍必須執行算術檢查。
     Evaluate(Expression),
 }
 
-/// println! 格式已解析為文字與參數索引；文字不含 NUL。
+/// print!／println! 格式已解析為文字與參數索引；文字不含 NUL。
 pub(crate) enum PrintPart {
     Text(String),
     Argument(usize),
@@ -57,11 +76,15 @@ pub(crate) struct Expression {
     pub(crate) kind: ExpressionKind,
 }
 
-/// 純值運算式；不含賦值、函式呼叫或有副作用的區塊。
+/// 值運算式；呼叫與輸入可能有副作用，必須依序求值。
 pub(crate) enum ExpressionKind {
     Integer(i32),
     Boolean(bool),
     Variable(usize),
+    Unit,
+    Call(usize, Vec<Expression>),
+    ReadI32,
+    FlushStdout,
     Unary(UnaryOp, Box<Expression>),
     Binary(BinaryOp, Box<Expression>, Box<Expression>),
 }

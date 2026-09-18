@@ -65,14 +65,14 @@ translation capabilities below distinguish completed work from planned features.
 
 ### Milestones
 
-The current version is **v0.3.0**.
+The current version is **v0.4.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
 | v0.1.0 | End-to-end Hello World translation | Completed |
 | v0.2.0 | Variables, basic types, and expressions | Completed (within the subset below) |
 | v0.3.0 | Conditionals and loops | Completed (statement forms within the subset below) |
-| v0.4.0 | Functions, basic output, and limited typed stdin | Planned |
+| v0.4.0 | Functions, basic output, and limited typed stdin | Completed (within the subset below) |
 | v0.5.0 | f64 types, basic floating-point operations, and input/output | Planned |
 | v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
 | v0.7.0 | Line input, string splitting/parsing, and limited math functions | Planned |
@@ -105,16 +105,15 @@ BMI-style exercises. Math functions require their own precision and
 special-value rules before acceptance. `f32` and additional math functions are
 deferred to later work. All floating-point features remain **planned**.
 
-#### Planned stdin support
+#### Stdin support and next stages
 
-**v0.4.0** introduces a limited typed-input interface for whitespace-separated
+**v0.4.0** supports `idwc::io::read_i32()` for ASCII-whitespace-separated
 `i32` values, including multiple values on one line, cross-line input, and
-repeated reads. Its Rust-facing interface will be chosen before implementation;
-this milestone does not require full `std::io`, `String`, or `Vec` support.
-It also covers output without a newline and explicit stdout flushing for
-interactive prompts. EOF, I/O errors, invalid tokens, out-of-range numbers, and
-overlong input must have defined behavior. Integration tests will feed the same
-stdin to trusted Rust and C programs and compare results.
+repeated reads. `print!` and `idwc::io::flush_stdout()` support interactive
+prompts. These exact interfaces have native Rust implementations in this crate;
+generated C uses only the C standard library. Full `std::io`, `String`, and
+`Vec` are outside this stage. See the input contract below for token limits and
+failure behavior. Tests feed identical stdin to trusted Rust and C programs.
 
 **v0.5.0** extends typed input to `f64`, as specified above.
 
@@ -130,9 +129,9 @@ specified and tested. Accepted input/parse `.unwrap()` patterns must fail in a
 controlled way. These goals do not imply general support for `String`, `Vec`,
 iterators, generics, or borrowing.
 
-All input stages are **planned**, not supported in the current v0.3.0 release.
+Floating-point and line/string input remain **planned**.
 
-### Current release: v0.3.0
+### Current release: v0.4.0
 
 Requires Rust 1.88 or newer (edition 2024) to build the transpiler, and Clang or GCC
 to compile the generated C17 program.
@@ -167,6 +166,17 @@ clang -std=c17 /tmp/idwc-control-flow.c -o /tmp/idwc-control-flow
 # after loop = 6
 ```
 
+The functions/input example reads two integers and calls typed helper functions:
+
+```bash
+cargo run -- examples/functions_stdin.rs -o /tmp/idwc-functions.c
+clang -std=c17 /tmp/idwc-functions.c -o /tmp/idwc-functions
+printf '3 4\n' | /tmp/idwc-functions
+# Enter two integers: sum = 7, positive = true
+# Run the original Rust example with the same input:
+printf '3 4\n' | cargo run --example functions_stdin
+```
+
 To use the `idwc` executable directly, run `cargo build` and then
 `./target/debug/idwc examples/hello.rs -o /tmp/idwc-hello.c`.
 Use `--help` for CLI usage. Input must have a `.rs` extension and output `.c`.
@@ -188,6 +198,16 @@ fn main() {
 
 - Exactly one private `fn main()`, without parameters, generics, attributes,
   modifiers, or an explicit return type.
+- Additional private, nongeneric functions with `i32` / `bool` value parameters
+  (including `mut` parameters) and `i32` / `bool` / unit returns. Omitted return
+  types mean unit; helpers may explicitly return `()`. Forward calls and
+  recursion are supported; calling `main` and indirect calls are rejected.
+- `return;`, `return ();`, and typed `return value;`; typed functions also
+  accept a final value expression such as `a + b` or another function call.
+  A conservative return check requires an explicit guaranteed return, a final
+  value expression, or returns in both `if` / `else` branches. A loop alone does
+  not establish a guaranteed return. Parameters are copied and each function
+  has independent local scopes. Unit bindings and unit parameters are rejected.
 - Initialized `let` and `let mut` bindings, with optional `i32` or `bool`
   annotations. Unsuffixed integers default to `i32`; the `i32` suffix is allowed.
 - Integer literals in decimal, hex, octal, and binary, including `i32::MIN`
@@ -199,25 +219,31 @@ fn main() {
   `%=`) to mutable bindings. Assignment is a statement, not a value expression.
 - Multiple statements, nested statement blocks, same-scope and nested shadowing,
   and optional empty main. Value-returning blocks are not supported.
-- Statement-form `if` / `else if` / `else` with pure `bool` conditions and
+- Statement-form `if` / `else if` / `else` with `bool` conditions and
   unit-valued branches. Only the selected branch is executed.
 - Unlabeled statement-form `while` and `loop`, including nested loops.
-  A `while` condition must be a pure `bool` expression and is re-evaluated
+  A `while` condition must be a `bool` expression and is re-evaluated
   before every iteration.
 - Unlabeled `break` and `continue` inside a loop, acting on the innermost loop.
   `break` cannot carry a value; `continue` in a `while` loop rechecks its condition.
-- Pure `i32` / `bool` expression statements with a semicolon may discard their
-  result; arithmetic checks still run.
-- `println!` with a string literal and sequential `{}` placeholders for `i32`
+- `i32` / `bool` expression statements with a semicolon may discard their
+  result; arithmetic checks and call side effects still run. Unit calls may
+  omit the semicolon at the end of a block.
+- `print!` / `println!` with a string literal and sequential `{}` placeholders for `i32`
   and `bool` expressions; a trailing comma is allowed. Empty-argument
   `println!()` is not supported; use `println!("")`.
+- The exact qualified calls `idwc::io::read_i32()` and
+  `idwc::io::flush_stdout()`; imports and arbitrary standard-library calls are
+  not accepted. Input and function calls may appear in expressions, conditions,
+  and output arguments, preserving left-to-right and short-circuit evaluation.
 - Ordinary and raw Rust strings, basic escapes, and UTF-8 text.
 - Literal braces use `{{` and `}}`, matching Rust formatting rules.
 - Identifiers are currently ASCII only, including raw identifiers such as
   `r#type`. C keyword collisions are avoided by assigning each binding a unique
-  generated name. Unicode identifier normalization is not implemented yet.
+  generated name; functions have separate generated names. Unicode identifier
+  normalization is not implemented yet.
 - Captured or numbered placeholders, format specifications, named arguments,
-  embedded NUL, unsupported types/operators, functions, and other
+  embedded NUL, unsupported types/operators, and non-function
   top-level items are rejected with an error.
 - Comments are allowed; doc comments are attributes and are rejected.
 
@@ -228,17 +254,17 @@ All branches and loop bodies are validated, including unreachable ones.
 Unsupported syntax is reported as an error rather than silently ignored.
 
 Value-producing control-flow expressions, `break` with a value, loop labels,
-`if let`, `while let`, and `match` are not supported. Custom functions and
-`return`, integer-range `for`, arrays, indexing, standard input, and additional
-integer types remain planned. Floating-point types are not supported yet;
-limited integer stdin is targeted for v0.4.0, `f64` and typed floating-point input
-for v0.5.0, and line/string input for v0.7.0 as described above.
+`if let`, `while let`, and `match` are not supported. Integer-range `for`, arrays,
+indexing, and additional integer types remain planned. Floating-point types are
+not supported yet; `f64` and typed floating-point input are targeted for v0.5.0,
+and line/string input for v0.7.0 as described above.
 Async, unsafe code, raw
 pointers, generics/traits, closures, iterator chains, arbitrary macros, full
 `std`, complex ownership/borrowing, and Cargo dependencies in input programs
 are outside the initial supported subset.
 
-Text-only output uses `puts`, which adds the newline. Typed output evaluates
+Text-only `println!` uses `puts`, which adds the newline; `print!` uses `fputs`.
+Typed output evaluates
 all arguments from left to right before writing any part of the message, then
 uses fixed C format strings; input text is never used as a C format string.
 Booleans print as `true` / `false`. Embedded NUL is rejected because
@@ -246,6 +272,35 @@ C string functions would truncate the output. UTF-8 and control bytes use fixed-
 escapes, and question marks are escaped to avoid C17 trigraph processing.
 Output comparisons cover normal successful writes to stdout; Rust panic and C
 I/O error behavior are not guaranteed to match when stdout fails.
+
+#### Typed input contract
+
+`idwc::io::read_i32() -> i32` skips ASCII space, tab, LF, CR, vertical tab, and
+form feed, then reads one token (up to 128 bytes, including a sign). Tokens must
+match `[+-]?[0-9]+` and fit `i32`. Leading zeros and signed zero are allowed.
+Hex, underscores, suffixes, decimal points, non-ASCII whitespace/digits, and
+partial numeric prefixes are rejected. A valid token immediately followed by
+EOF succeeds; the next read fails. No full line is required.
+
+Failure flushes stdout, writes one diagnostic to stderr, and exits with status
+101. Token length is checked first, then the entire token's syntax, then range;
+no value is returned on failure. Errors are:
+
+| Condition | Diagnostic |
+| --- | --- |
+| EOF before the next token | `idwc: unexpected EOF` |
+| Read error (including after token bytes) | `idwc: stdin I/O error` |
+| Invalid complete token | `idwc: invalid integer` |
+| Outside the i32 range | `idwc: integer out of range` |
+| More than 128 token bytes | `idwc: input token too long` |
+| Explicit stdout flush failed | `idwc: stdout flush error` |
+
+`idwc::io::flush_stdout() -> ()` checks flush success; use it after `print!`
+before reading interactive input. On platforms defining `SIGPIPE`, C flush and
+failure paths ignore that signal so a closed output pipe permits a controlled
+diagnostic. Other output errors retain the limitation
+described above. Native Rust examples link this crate through Cargo; no extra
+crate or Rust library is needed to compile the generated C.
 
 #### Integer semantics
 
@@ -270,16 +325,20 @@ Rust source → syn AST → whitelist validation + semantic analysis → typed I
 ```
 
 `src/lib.rs` exposes `transpile(&str) -> Result<String, TranspileError>`.
-`src/validate.rs` validates the file and main signature. `src/semantic.rs` uses
+`src/validate.rs` validates the file and function signatures. `src/semantic.rs` uses
 a scope stack and symbol table to resolve bindings, infer/check types, and
-reject immutable assignment before building the typed IR in `src/ir.rs`.
-`src/format.rs` parses the supported `println!` format. `src/codegen.rs` generates
+reject immutable assignment before building the typed IR in `src/ir.rs`. It
+registers function signatures before checking bodies, resolves calls, and checks
+parameter/return types and guaranteed returns.
+`src/format.rs` parses the supported `print!` / `println!` format. `src/codegen.rs` generates
 C from IR, using temporaries to preserve evaluation order and conditional
 statements for short-circuit operands; it does not inspect the syn AST.
 `while` is lowered to a C `for (;;)` with a condition check at the start of each
 iteration, so generated arithmetic temporaries and `continue` preserve Rust
 evaluation behavior. `loop` uses a C `for (;;)` without a condition check.
-`src/main.rs` handles arguments and file I/O. Input programs and custom macros
+Function prototypes precede definitions; call arguments are saved into ordered
+temporaries. `src/io.rs` implements the native Rust typed-input/flush interface,
+mirrored by bounded C runtime helpers. `src/main.rs` handles arguments and file I/O. Input programs and custom macros
 are never run during translation. The only direct dependency remains `syn`.
 
 ```bash
@@ -291,7 +350,10 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 Tests cover expected C output, unsupported syntax, semantic errors, scopes,
 short-circuit behavior, branches, nested loops, `break` / `continue`, condition
-re-evaluation, CLI success/error paths,
+re-evaluation, functions/recursion/returns, argument side effects, stdin token
+validation and boundaries, EOF and I/O errors, prompts flushed before input,
+explicit flush failure with a closed output pipe,
+CLI success/error paths,
 and compilation of trusted fixtures with both Rust and C17. Runtime comparisons
 check output bytes and exit status. End-to-end tests require `rustc` and Clang
 or GCC on `PATH` and fail explicitly if no C compiler is available. Arithmetic
@@ -299,7 +361,10 @@ failure tests also require the compiler's UndefinedBehaviorSanitizer support:
 they compile C with `-O2 -fsanitize=undefined -fno-sanitize-recover=undefined`,
 compare failure exit status and stdout against Rust with checked arithmetic,
 and check C diagnostics. Rust panic diagnostic text is intentionally not compared.
-Control-flow executables have a five-second timeout so regressions cannot leave
+Function and input fixtures also run optimized C with UBSan and compare stdout,
+stderr, and exit status against Rust. The interactive prompt test observes the
+prompt before sending stdin. Control-flow and input executables have a
+five-second timeout so regressions cannot leave
 the test suite stuck in an infinite loop.
 
 If your Rust code is too complicated, IdwC will politely refuse to translate it.

@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -53,11 +54,15 @@ fn successful(command: &mut Command) -> Output {
 
 /// 限制可信任迴圈案例的執行時間，避免條件重算或 continue 迴歸造成測試卡住。
 fn run_with_timeout(command: &mut Command) -> Output {
-    let mut child = command
+    let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("無法啟動測試程式");
+    wait_with_timeout(child)
+}
+
+fn wait_with_timeout(mut child: Child) -> Output {
     let start = Instant::now();
     loop {
         if child.try_wait().unwrap().is_some() {
@@ -66,10 +71,66 @@ fn run_with_timeout(command: &mut Command) -> Output {
         if start.elapsed() > Duration::from_secs(5) {
             child.kill().unwrap();
             let _ = child.wait_with_output();
-            panic!("迴圈案例執行逾時：{command:?}");
+            panic!("測試程式執行逾時");
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn run_with_input(binary: &Path, input: &[u8]) -> Output {
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    wait_with_timeout(child)
+}
+
+/// Rust 參考程式引用相同的公開 I/O 實作；轉譯器只解析原始的受限程式。
+fn compile_pair(dir: &TestDir, source: &str) -> (PathBuf, PathBuf) {
+    let rust_source = dir.file("input.rs");
+    let c_source = dir.file("output.c");
+    let rust_binary = dir.file("rust-output");
+    let c_binary = dir.file("c-output");
+    let io_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/io.rs");
+    fs::write(
+        &rust_source,
+        format!("mod idwc {{ #[path = {io_source:?}] pub mod io; }}\n{source}"),
+    )
+    .unwrap();
+    fs::write(&c_source, idwc::transpile(source).unwrap()).unwrap();
+    successful(
+        Command::new("rustc")
+            .args(["--edition=2024", "-C", "overflow-checks=yes"])
+            .arg(&rust_source)
+            .arg("-o")
+            .arg(&rust_binary),
+    );
+    successful(
+        Command::new(c_compiler())
+            .args([
+                "-std=c17",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic-errors",
+                "-O2",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=undefined",
+            ])
+            .arg(&c_source)
+            .arg("-o")
+            .arg(&c_binary),
+    );
+    (rust_binary, c_binary)
+}
+
+fn assert_same_output(rust: &Output, c: &Output) {
+    assert_eq!(rust.status.code(), c.status.code());
+    assert_eq!(rust.stdout, c.stdout);
+    assert_eq!(rust.stderr, c.stderr);
 }
 
 /// 優先使用 Clang，未安裝時改用 GCC；兩者都缺少時明確失敗。
@@ -500,7 +561,7 @@ fn cli_reports_errors_without_overwriting_output() {
     let dir = TestDir::new();
     let input = dir.file("invalid.rs");
     let output = dir.file("output.c");
-    fs::write(&input, "fn main() { return; }").unwrap();
+    fs::write(&input, "fn main() { let x = 1.0; }").unwrap();
     fs::write(&output, "existing output").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
         .arg(&input)
@@ -559,5 +620,186 @@ fn cli_checks_arguments_and_provides_help() {
             .unwrap();
         assert!(!result.status.success(), "應拒絕參數：{args:?}");
         assert!(!result.stderr.is_empty());
+    }
+}
+
+/// 向前宣告、遞迴、值參數與呼叫副作用在 Rust 和 C 中保持一致。
+#[test]
+fn functions_match_rust_output() {
+    let cases = [
+        r#"fn main() { println!("{} {}", factorial(6), even(8)); }
+        fn factorial(n: i32) -> i32 { if n <= 1 { return 1; } n * factorial(n - 1) }
+        fn even(n: i32) -> bool { if n == 0 { return true; } odd(n - 1) }
+        fn odd(n: i32) -> bool { if n == 0 { return false; } even(n - 1) }"#,
+        r#"fn main() { let x = 3; println!("{} {}", bump(x), x); done(); }
+        fn bump(mut x: i32) -> i32 { x += 2; { let x = false; println!("{}", x); } x }
+        fn done() -> () { print!("done"); return (); }"#,
+        r#"fn main() { println!("answer = {}", sum(mark(1), mark(2))); }
+        fn mark(n: i32) -> i32 { print!("{} ", n); n }
+        fn sum(a: i32, b: i32) -> i32 { a + b }"#,
+        r#"fn main() { println!("{} {}", false && mark(), true || mark()); finish() }
+        fn mark() -> bool { println!("unexpected"); true }
+        fn finish() { println!("finished"); }"#,
+        r#"fn main() { println!("{}", classify(false)); return; }
+        fn classify(n: bool) -> i32 { if n { return 1; } else { return -1; } }"#,
+        r#"fn main() { let mut n = 0; while active(n) { n += 1; continue; } println!("{}", n); }
+        fn active(n: i32) -> bool { print!("{} ", n); n < 3 }"#,
+        r#"fn main() { println!("{}", r#int(2)); }
+        fn r#int(printf: i32) -> i32 { printf } fn unused(_n: bool) {}"#,
+        "fn main() { return (); } fn unit() -> () { () }",
+    ];
+    let dir = TestDir::new();
+    for source in cases {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, b"");
+        let c = run_with_input(&c, b"");
+        assert!(rust.status.success(), "{source}");
+        assert_same_output(&rust, &c);
+    }
+}
+
+/// 在相同 stdin 下比較多次讀取、格式拒絕、長度、EOF 與 i32 邊界。
+#[test]
+fn typed_stdin_matches_rust_output() {
+    let source = r#"fn main() { print!("input: "); idwc::io::flush_stdout();
+        let first = idwc::io::read_i32(); println!("first = {}", first);
+        println!("second = {}", read_next()); }
+        fn read_next() -> i32 { idwc::io::read_i32() }"#;
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(&dir, source);
+    let mut cases: Vec<(Vec<u8>, Option<&str>)> = vec![
+        (b"12 34".to_vec(), None),
+        (
+            b" \t\r\n\x0b\x0c+2147483647\n-2147483648\r\n".to_vec(),
+            None,
+        ),
+        (b"-0 +007".to_vec(), None),
+        (b"".to_vec(), Some("unexpected EOF")),
+        (b" \t\n".to_vec(), Some("unexpected EOF")),
+        (b"1".to_vec(), Some("unexpected EOF")),
+        (b"12x 2".to_vec(), Some("invalid integer")),
+        (b"1 2x".to_vec(), Some("invalid integer")),
+        (b"+ 2".to_vec(), Some("invalid integer")),
+        (b"- 2".to_vec(), Some("invalid integer")),
+        (b"1.0 2".to_vec(), Some("invalid integer")),
+        (b"0xff 2".to_vec(), Some("invalid integer")),
+        (b"1_000 2".to_vec(), Some("invalid integer")),
+        (b"1\0 2".to_vec(), Some("invalid integer")),
+        (b"\xff 2".to_vec(), Some("invalid integer")),
+        ("１２ 2".as_bytes().to_vec(), Some("invalid integer")),
+        (b"2147483648 2".to_vec(), Some("integer out of range")),
+        (b"-2147483649 2".to_vec(), Some("integer out of range")),
+        (
+            b"999999999999999999999x 2".to_vec(),
+            Some("invalid integer"),
+        ),
+    ];
+    let mut boundary = vec![b'0'; 128];
+    boundary.extend_from_slice(b" 2");
+    cases.push((boundary, None));
+    cases.push((vec![b'0'; 129], Some("input token too long")));
+    cases.push((vec![b'9'; 128], Some("integer out of range")));
+    for (input, error) in cases {
+        let rust = run_with_input(&rust, &input);
+        let c = run_with_input(&c, &input);
+        assert_same_output(&rust, &c);
+        match error {
+            None => assert!(c.status.success(), "{input:?}"),
+            Some(message) => {
+                assert_eq!(c.status.code(), Some(101), "{input:?}");
+                assert_eq!(c.stderr, format!("idwc: {message}\n").as_bytes());
+                assert!(c.stdout.starts_with(b"input: "));
+            }
+        }
+    }
+    // POSIX/macOS：讀取目錄會回報 I/O 錯誤，不能誤當 EOF。
+    let run_directory = |binary: &Path| {
+        run_with_timeout(Command::new(binary).stdin(Stdio::from(fs::File::open(&dir.0).unwrap())))
+    };
+    let rust_output = run_directory(&rust);
+    let c_output = run_directory(&c);
+    assert_same_output(&rust_output, &c_output);
+    assert_eq!(c_output.stderr, b"idwc: stdin I/O error\n");
+    assert_eq!(c_output.status.code(), Some(101));
+}
+
+#[test]
+fn stdin_call_order_and_short_circuit_match_rust() {
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(
+        &dir,
+        r#"fn main() {
+        println!("{}", subtract(idwc::io::read_i32(), idwc::io::read_i32()));
+        println!("{} {}", false && (idwc::io::read_i32() == 0),
+            true || (idwc::io::read_i32() == 0));
+        println!("{}", idwc::io::read_i32()); }
+        fn subtract(a: i32, b: i32) -> i32 { a - b }"#,
+    );
+    let rust = run_with_input(&rust, b"9 4 7");
+    let c = run_with_input(&c, b"9 4 7");
+    assert_same_output(&rust, &c);
+    assert_eq!(c.stdout, b"5\nfalse true\n7\n");
+    assert!(c.status.success());
+}
+
+/// stdin 尚未收到資料時就必須觀察到提示，避免換行掩蓋 flush 問題。
+#[test]
+fn interactive_prompt_is_flushed_before_input() {
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(&dir, include_str!("../examples/functions_stdin.rs"));
+    for binary in [rust, c] {
+        let mut child = Command::new(binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut prompt = [0; 20];
+            let result = stdout.read_exact(&mut prompt);
+            let _ = sender.send((result, prompt));
+            let mut remaining = Vec::new();
+            stdout.read_to_end(&mut remaining).unwrap();
+            remaining
+        });
+        let prompt = receiver.recv_timeout(Duration::from_secs(2));
+        if prompt.is_err() {
+            child.kill().unwrap();
+            let _ = child.wait();
+            let _ = reader.join();
+            panic!("提示未在等待輸入前 flush");
+        }
+        let (result, prompt) = prompt.unwrap();
+        result.unwrap();
+        assert_eq!(&prompt, b"Enter two integers: ");
+        child.stdin.take().unwrap().write_all(b"3 4\n").unwrap();
+        let output = wait_with_timeout(child);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(reader.join().unwrap(), b"sum = 7, positive = true\n");
+    }
+}
+
+/// 明確 flush 的失敗必須回報診斷，不能回到 main 繼續執行。
+#[test]
+fn explicit_flush_reports_io_failure() {
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(
+        &dir,
+        r#"fn main() { print!("prompt");
+        idwc::io::flush_stdout(); println!("unexpected"); }"#,
+    );
+    for binary in [rust, c] {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let fd = std::os::fd::OwnedFd::from(writer);
+        let output = Command::new(&binary)
+            .stdout(Stdio::from(fd))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(101), "{binary:?}: {output:?}");
+        assert_eq!(output.stderr, b"idwc: stdout flush error\n");
     }
 }

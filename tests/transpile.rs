@@ -29,10 +29,6 @@ fn accepts_supported_macro_forms() {
 #[test]
 fn rejects_unsupported_syntax() {
     let sources = [
-        "",
-        r#"fn other() { println!("hello"); }"#,
-        r#"fn main() { println!("hello"); } fn other() {}"#,
-        r#"fn main() { println!("hello"); } fn main() {}"#,
         r#"const X: i32 = 1; fn main() { println!("hello"); }"#,
         r#"use std::io; fn main() { println!("hello"); }"#,
         r#"mod nested { fn main() { println!("hello"); } }"#,
@@ -52,10 +48,10 @@ fn main() { println!("hello"); }"#,
         r#"fn main() where i32: Copy { println!("hello"); }"#,
         r#"fn main(x: i32) { println!("hello"); }"#,
         r#"fn main() -> () { println!("hello"); }"#,
-        r#"fn main() { println!("hello"); return; }"#,
+        "fn r#main(x: i32) {}",
+        "fn r#main() -> i32 { 1 }",
         r#"fn main() { #[cfg(any())] println!("hello"); }"#,
         r#"fn main() { #![allow(unused)] println!("hello"); }"#,
-        r#"fn main() { print!("hello"); }"#,
         r#"fn main() { std::println!("hello"); }"#,
         r#"fn main() { ::println!("hello"); }"#,
         r#"macro_rules! println { () => {} } fn main() { println!("hello"); }"#,
@@ -141,9 +137,9 @@ fn rejects_semantic_errors() {
     }
 }
 
-/// v0.3.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+/// v0.4.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_3() {
+fn rejects_features_outside_v0_4() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -163,7 +159,6 @@ fn rejects_features_outside_v0_3() {
         "fn main() { let x = 1 | 2; }",
         "fn main() { let x = 1 ^ 2; }",
         "fn main() { let x = 1 as bool; }",
-        "fn main() { let x = f(); }",
         "fn main() { let x = 1.abs(); }",
         "fn main() { let x = { 1 }; }",
         "fn main() { let mut x = 1; let y = (x = 2); }",
@@ -288,8 +283,6 @@ fn rejects_unsupported_control_flow_forms() {
         "fn main() { while { true } {} }",
         "fn main() { for x in 0..3 {} }",
         "fn main() { match 1 { _ => {} } }",
-        "fn main() { if false { return; } }",
-        "fn main() { while false { return; } }",
         "fn main() { #[cfg(any())] if true {} }",
         "fn main() { #[cfg(any())] while true {} }",
         "fn main() { #[cfg(any())] loop {} }",
@@ -322,5 +315,86 @@ fn reports_parse_errors() {
         assert!(matches!(error, TranspileError::Parse(_)));
         assert!(error.to_string().contains("Rust 解析失敗"));
         assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+/// 簽章先註冊，函式各自保留 scope 與回傳型別。
+#[test]
+fn accepts_functions_return_and_io() {
+    for source in [
+        include_str!("../examples/functions_stdin.rs"),
+        "fn main() { return; } fn unused() {}",
+        "fn r#main() {}",
+        "fn main() { return (); } fn unit() -> () { () }",
+        "fn main() { unit() } fn unit() { return (); }",
+        "fn main() { f(1); } fn f(mut x: i32) -> i32 { x += 1; x }",
+        "fn main() {} fn f(x: bool) -> i32 { if x { return 1; } else { return 2; } }",
+        "fn main() {} fn f() -> i32 { { return 1; } }",
+        "fn main() { idwc::io::flush_stdout() }",
+        "fn main() { let n = idwc::io::read_i32(); while n > 0 { return; } }",
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}：{result:?}");
+    }
+}
+
+/// 不讓 C 的隱式轉型、宣告順序或缺少 return 隱藏錯誤。
+#[test]
+fn rejects_function_semantic_errors() {
+    for source in [
+        "",
+        "fn other() {}",
+        "fn main() {} fn main() {}",
+        "fn main() {} fn f() {} fn f() {}",
+        "fn main() {} fn f(x: i32, x: i32) {}",
+        "fn main() { f(); }",
+        "fn main() { f(); } fn f(x: i32) {}",
+        "fn main() { f(1, 2); } fn f(x: i32) {}",
+        "fn main() { f(true); } fn f(x: i32) {}",
+        "fn main() { let f = 1; f(); } fn f() {}",
+        "fn main() { return 1; }",
+        "fn main() {} fn f() -> i32 { return; }",
+        "fn main() {} fn f() -> i32 { true }",
+        "fn main() {} fn f() -> i32 {}",
+        "fn main() {} fn f(x: bool) -> i32 { if x { return 1; } }",
+        "fn main() {} fn f() -> i32 { while true { return 1; } }",
+        "fn main() {} fn f() -> i32 { 1; }",
+        "fn main() {} fn f(x: i32) { x = 2; }",
+        "fn main() { let x = 1; f(); } fn f() { println!(\"{}\", x); }",
+        "fn main() { idwc::io::read_i32(1); }",
+        "fn main() { idwc::io::flush_stdout(1); }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Semantic(_))),
+            "{source}：{result:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_function_and_io_forms() {
+    for source in [
+        "fn main() { main(); }",
+        "fn main() {} pub fn f() {}",
+        "fn main() {} fn f<T>() {}",
+        "fn main() {} fn f(x: &i32) {}",
+        "fn main() {} fn f((x, y): (i32, i32)) {}",
+        "fn main() {} fn f(x: ()) {}",
+        "fn main() {} fn f() -> f64 { 1.0 }",
+        "fn main() {} fn f() -> i32 { if true { 1 } else { 2 } }",
+        "fn main() { let x = idwc::io::flush_stdout(); }",
+        "fn main() { idwc::io::read_f64(); }",
+        "fn main() { std::io::stdin(); }",
+        "fn main() { idwc::io::read_i32::<i32>(); }",
+        "fn main() { println!(\"{}\", ()); }",
+        "fn main() { let x = () == (); }",
+        "fn main() { fn nested() {} }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Unsupported(_))),
+            "{source}：{result:?}"
+        );
     }
 }

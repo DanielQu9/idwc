@@ -4,7 +4,10 @@ use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp, ext::IdentExt};
 
 use crate::{
     TranspileError,
-    ir::{BinaryOp, Expression, ExpressionKind, Program, Statement, Type, UnaryOp},
+    ir::{
+        BinaryOp, Expression, ExpressionKind, Function, Parameter, Program, Statement, Type,
+        UnaryOp,
+    },
 };
 
 /// 名稱解析後的 binding；id 在離開 scope 後也不重用。
@@ -16,25 +19,155 @@ struct Binding {
 }
 
 /// 以 scope 堆疊解析名稱，並在降低 AST 時檢查型別與可變性。
-struct Analyzer {
+struct Analyzer<'a> {
     scopes: Vec<HashMap<String, Binding>>,
     next_id: usize,
     loop_depth: usize,
+    functions: &'a HashMap<String, Callable>,
+    return_type: Type,
 }
 
-/// 分析 main 主體，產生不再依賴 Rust 名稱解析的 IR。
-pub(crate) fn analyze(block: &syn::Block) -> Result<Program, TranspileError> {
-    let mut analyzer = Analyzer {
-        scopes: Vec::new(),
-        next_id: 0,
-        loop_depth: 0,
+/// 第一階段收集的函式簽名，允許向前呼叫與遞迴。
+struct Callable {
+    id: usize,
+    parameters: Vec<Type>,
+    return_type: Type,
+}
+
+/// 先註冊所有函式簽名，再以獨立 scope 分析各函式主體。
+pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError> {
+    let mut functions = HashMap::new();
+    for (id, function) in items.iter().enumerate() {
+        let name = function.sig.ident.unraw().to_string();
+        if !name.is_ascii() {
+            return Err(TranspileError::Unsupported("函式識別字暫僅接受 ASCII"));
+        }
+        let mut parameters = Vec::new();
+        for arg in &function.sig.inputs {
+            let syn::FnArg::Typed(parameter) = arg else {
+                return Err(TranspileError::Unsupported("不接受 self 參數"));
+            };
+            if !parameter.attrs.is_empty() {
+                return Err(TranspileError::Unsupported("不接受參數屬性"));
+            }
+            binding_pattern(&parameter.pat)?;
+            let ty = parse_type(&parameter.ty)?;
+            require_value(ty)?;
+            parameters.push(ty);
+        }
+        let return_type = match &function.sig.output {
+            syn::ReturnType::Default => Type::Unit,
+            syn::ReturnType::Type(_, ty) => parse_type(ty)?,
+        };
+        if functions
+            .insert(
+                name.clone(),
+                Callable {
+                    id,
+                    parameters,
+                    return_type,
+                },
+            )
+            .is_some()
+        {
+            return Err(TranspileError::Semantic(format!("重複的函式 `{name}`")));
+        }
+    }
+    if !functions.contains_key("main") {
+        return Err(TranspileError::Semantic("缺少 fn main()".into()));
+    }
+    let mut program = Program {
+        statements: Vec::new(),
+        functions: Vec::new(),
     };
-    Ok(Program {
-        statements: analyzer.block(block)?,
-    })
+    for function in items {
+        let name = function.sig.ident.unraw().to_string();
+        let signature = &functions[&name];
+        let mut analyzer = Analyzer {
+            scopes: vec![HashMap::new()],
+            next_id: 0,
+            loop_depth: 0,
+            functions: &functions,
+            return_type: signature.return_type,
+        };
+        let mut parameters = Vec::new();
+        for (arg, ty) in function.sig.inputs.iter().zip(&signature.parameters) {
+            let syn::FnArg::Typed(parameter) = arg else {
+                unreachable!("參數已驗證");
+            };
+            let ident = binding_pattern(&parameter.pat)?;
+            let name = ident.ident.unraw().to_string();
+            let binding = Binding {
+                id: analyzer.next_id,
+                ty: *ty,
+                mutable: ident.mutability.is_some(),
+            };
+            analyzer.next_id += 1;
+            if analyzer.scopes[0].insert(name.clone(), binding).is_some() {
+                return Err(TranspileError::Semantic(format!("重複的參數 `{name}`")));
+            }
+            parameters.push(Parameter {
+                id: binding.id,
+                ty: binding.ty,
+                mutable: binding.mutable,
+            });
+        }
+        let statements = analyzer.function_body(&function.block)?;
+        if signature.return_type != Type::Unit && !definitely_returns(&statements) {
+            return Err(TranspileError::Semantic(format!(
+                "函式 `{name}` 可能沒有回傳值"
+            )));
+        }
+        if name == "main" {
+            program.statements = statements;
+        } else {
+            program.functions.push(Function {
+                id: signature.id,
+                parameters,
+                return_type: signature.return_type,
+                statements,
+            });
+        }
+    }
+    Ok(program)
 }
 
-impl Analyzer {
+impl Analyzer<'_> {
+    /// 有值函式的最後一個值運算式降低為 return，內部敘述區塊仍維持 unit。
+    fn function_body(&mut self, block: &syn::Block) -> Result<Vec<Statement>, TranspileError> {
+        self.scopes.push(HashMap::new());
+        let result = (|| {
+            let mut statements = Vec::new();
+            for (index, statement) in block.stmts.iter().enumerate() {
+                if index + 1 == block.stmts.len()
+                    && let Stmt::Expr(expr, None) = statement
+                {
+                    match self.expression(expr) {
+                        Ok(value) => {
+                            if self.return_type == Type::Unit && value.ty != Type::Unit {
+                                return Err(TranspileError::Unsupported(
+                                    "unit 函式不能使用有值的尾運算式",
+                                ));
+                            }
+                            same_type(self.return_type, value.ty)?;
+                            if self.return_type == Type::Unit {
+                                statements.push(Statement::Evaluate(value));
+                            } else {
+                                statements.push(Statement::Return(Some(value)));
+                            }
+                            continue;
+                        }
+                        Err(TranspileError::Unsupported(_)) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                statements.push(self.statement(statement)?);
+            }
+            Ok(statements)
+        })();
+        self.scopes.pop();
+        result
+    }
     /// 每個區塊建立 scope；離開後恢復外層 binding。
     fn block(&mut self, block: &syn::Block) -> Result<Vec<Statement>, TranspileError> {
         self.scopes.push(HashMap::new());
@@ -83,6 +216,23 @@ impl Analyzer {
                 self.check_loop_context()?;
                 Ok(Statement::Continue)
             }
+            Stmt::Expr(Expr::Return(ret), _) if ret.attrs.is_empty() => {
+                let value = ret
+                    .expr
+                    .as_ref()
+                    .map(|expr| self.expression(expr))
+                    .transpose()?;
+                same_type(
+                    self.return_type,
+                    value.as_ref().map_or(Type::Unit, |value| value.ty),
+                )?;
+                Ok(Statement::Return(value))
+            }
+            Stmt::Expr(Expr::Call(call), None) if call.attrs.is_empty() => {
+                let value = self.call(call)?;
+                same_type(Type::Unit, value.ty)?;
+                Ok(Statement::Evaluate(value))
+            }
             Stmt::Expr(Expr::Assign(assign), _) if assign.attrs.is_empty() => {
                 let binding = self.assignment_target(&assign.left)?;
                 let value = self.expression(&assign.right)?;
@@ -123,7 +273,7 @@ impl Analyzer {
         }
     }
 
-    /// 條件只接受純 bool 運算式，不使用 C 的整數 truthiness。
+    /// 條件只接受 bool 運算式，不使用 C 的整數 truthiness。
     fn condition(&self, expr: &Expr) -> Result<Expression, TranspileError> {
         let condition = self.expression(expr)?;
         same_type(Type::Bool, condition.ty)?;
@@ -173,7 +323,7 @@ impl Analyzer {
         Ok(())
     }
 
-    /// 只有帶分號的純值運算式可捨棄結果。
+    /// 帶分號的運算式可捨棄結果，但仍保留副作用。
     fn evaluate_statement(&self, statement: &Stmt) -> Result<Statement, TranspileError> {
         if let Stmt::Expr(expr, Some(_)) = statement {
             return Ok(Statement::Evaluate(self.expression(expr)?));
@@ -191,19 +341,7 @@ impl Analyzer {
             }
             pattern => (pattern, None),
         };
-        let Pat::Ident(ident) = pattern else {
-            return Err(TranspileError::Unsupported("let 僅接受單一識別字 binding"));
-        };
-        if !ident.attrs.is_empty() || ident.by_ref.is_some() || ident.subpat.is_some() {
-            return Err(TranspileError::Unsupported(
-                "不接受 binding 屬性、ref 或子 pattern",
-            ));
-        }
-        if !ident.ident.unraw().to_string().is_ascii() {
-            return Err(TranspileError::Unsupported(
-                "識別字暫僅接受 ASCII；尚未實作 Rust 的 Unicode 正規化",
-            ));
-        }
+        let ident = binding_pattern(pattern)?;
         let init = local
             .init
             .as_ref()
@@ -212,6 +350,7 @@ impl Analyzer {
             return Err(TranspileError::Unsupported("不接受 let-else"));
         }
         let value = self.expression(&init.expr)?;
+        require_value(value.ty)?;
         if let Some(annotation) = annotation {
             same_type(annotation, value.ty)?;
         }
@@ -231,14 +370,21 @@ impl Analyzer {
         })
     }
 
-    /// println! 參數只接受型別已知的純 i32／bool 運算式。
+    /// print!／println! 參數只接受型別已知的 i32／bool 運算式。
     fn print(&self, mac: &syn::Macro) -> Result<Statement, TranspileError> {
         let (parts, arguments) = crate::format::parse(mac)?;
         let arguments = arguments
             .iter()
             .map(|expr| self.expression(expr))
-            .collect::<Result<_, _>>()?;
-        Ok(Statement::Print { parts, arguments })
+            .collect::<Result<Vec<_>, _>>()?;
+        for argument in &arguments {
+            require_value(argument.ty)?;
+        }
+        Ok(Statement::Print {
+            parts,
+            arguments,
+            newline: mac.path.is_ident("println"),
+        })
     }
 
     /// 從內向外查詢識別字；不接受限定路徑或泛型參數。
@@ -270,9 +416,16 @@ impl Analyzer {
         Ok(binding)
     }
 
-    /// 遞迴檢查純值運算式；所有未列出的 AST 與屬性皆拒絕。
+    /// 遞迴檢查值運算式；所有未列出的 AST 與屬性皆拒絕。
     fn expression(&self, expr: &Expr) -> Result<Expression, TranspileError> {
         match expr {
+            Expr::Tuple(tuple) if tuple.attrs.is_empty() && tuple.elems.is_empty() => {
+                Ok(Expression {
+                    ty: Type::Unit,
+                    kind: ExpressionKind::Unit,
+                })
+            }
+            Expr::Call(call) if call.attrs.is_empty() => self.call(call),
             Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
                 Lit::Int(integer) => Ok(Expression {
                     ty: Type::I32,
@@ -338,10 +491,93 @@ impl Analyzer {
             _ => Err(TranspileError::Unsupported("不接受此值運算式或其屬性")),
         }
     }
+
+    /// 檢查內建 I/O 與使用者函式呼叫的路徑、引數數量與型別。
+    fn call(&self, call: &syn::ExprCall) -> Result<Expression, TranspileError> {
+        let Expr::Path(path) = call.func.as_ref() else {
+            return Err(TranspileError::Unsupported("不接受間接函式呼叫"));
+        };
+        if !path.attrs.is_empty()
+            || path.qself.is_some()
+            || path.path.leading_colon.is_some()
+            || path
+                .path
+                .segments
+                .iter()
+                .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return Err(TranspileError::Unsupported(
+                "不接受呼叫屬性、限定型別或泛型引數",
+            ));
+        }
+        let segments: Vec<_> = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        if segments.len() == 3 && segments[0] == "idwc" && segments[1] == "io" {
+            if !call.args.is_empty() {
+                return Err(TranspileError::Semantic("內建 I/O 不接受引數".into()));
+            }
+            return match segments[2].as_str() {
+                "read_i32" => Ok(Expression {
+                    ty: Type::I32,
+                    kind: ExpressionKind::ReadI32,
+                }),
+                "flush_stdout" => Ok(Expression {
+                    ty: Type::Unit,
+                    kind: ExpressionKind::FlushStdout,
+                }),
+                _ => Err(TranspileError::Unsupported("不支援此內建 I/O 介面")),
+            };
+        }
+        let ident = path.path.get_ident().ok_or(TranspileError::Unsupported(
+            "函式呼叫僅接受單一識別字或指定的 I/O 路徑",
+        ))?;
+        let name = ident.unraw().to_string();
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(&name))
+        {
+            return Err(TranspileError::Semantic(format!(
+                "`{name}` 被變數遮蔽，不能呼叫"
+            )));
+        }
+        if name == "main" {
+            return Err(TranspileError::Unsupported("不接受呼叫 main"));
+        }
+        let function = self
+            .functions
+            .get(&name)
+            .ok_or_else(|| TranspileError::Semantic(format!("找不到函式 `{name}`")))?;
+        if function.parameters.len() != call.args.len() {
+            return Err(TranspileError::Semantic(format!(
+                "函式 `{name}` 引數數量不符"
+            )));
+        }
+        let mut arguments = Vec::new();
+        for (arg, ty) in call.args.iter().zip(&function.parameters) {
+            let value = self.expression(arg)?;
+            same_type(*ty, value.ty)?;
+            arguments.push(value);
+        }
+        Ok(Expression {
+            ty: function.return_type,
+            kind: ExpressionKind::Call(function.id, arguments),
+        })
+    }
 }
 
-/// 型別註記僅接受未限定路徑的 i32 與 bool。
+/// 型別註記接受未限定路徑的 i32／bool，以及函式的 unit 回傳型別。
 fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
+    if let syn::Type::Tuple(tuple) = ty
+        && tuple.elems.is_empty()
+    {
+        return Ok(Type::Unit);
+    }
     if let syn::Type::Path(path) = ty
         && path.qself.is_none()
     {
@@ -352,7 +588,9 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
             return Ok(Type::Bool);
         }
     }
-    Err(TranspileError::Unsupported("型別僅接受 i32 與 bool"))
+    Err(TranspileError::Unsupported(
+        "型別僅接受 i32、bool 與 unit 回傳型別",
+    ))
 }
 
 /// 比對型別，避免 C 的隱式整數／布林轉換掩蓋 Rust 錯誤。
@@ -372,6 +610,7 @@ fn binary_expression(
     right: Expression,
 ) -> Result<Expression, TranspileError> {
     same_type(left.ty, right.ty)?;
+    require_value(left.ty)?;
     let ty = match op {
         BinaryOp::Equal | BinaryOp::NotEqual => Type::Bool,
         BinaryOp::And | BinaryOp::Or => {
@@ -391,6 +630,51 @@ fn binary_expression(
         ty,
         kind: ExpressionKind::Binary(op, Box::new(left), Box::new(right)),
     })
+}
+
+/// unit 僅用於函式回傳，不建立 unit 變數、參數或格式引數。
+fn require_value(ty: Type) -> Result<(), TranspileError> {
+    if ty == Type::Unit {
+        return Err(TranspileError::Unsupported(
+            "此處僅接受 i32 或 bool，不接受 unit 值",
+        ));
+    }
+    Ok(())
+}
+
+/// binding 僅接受無屬性、無借用的 ASCII 識別字。
+fn binding_pattern(pattern: &Pat) -> Result<&syn::PatIdent, TranspileError> {
+    let Pat::Ident(ident) = pattern else {
+        return Err(TranspileError::Unsupported("binding 僅接受單一識別字"));
+    };
+    if !ident.attrs.is_empty()
+        || ident.by_ref.is_some()
+        || ident.subpat.is_some()
+        || !ident.ident.unraw().to_string().is_ascii()
+    {
+        return Err(TranspileError::Unsupported(
+            "binding 僅接受無屬性、無借用的 ASCII 識別字",
+        ));
+    }
+    Ok(ident)
+}
+
+/// 保守檢查有值函式的回傳路徑；迴圈本身不視為保證回傳。
+fn definitely_returns(statements: &[Statement]) -> bool {
+    for statement in statements {
+        match statement {
+            Statement::Return(_) => return true,
+            Statement::Block(body) if definitely_returns(body) => return true,
+            Statement::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } if definitely_returns(then_branch) && definitely_returns(else_branch) => return true,
+            Statement::Break | Statement::Continue => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// 在不略過屬性驗證的前提下，尋找僅由括號包住的整數字面量。
