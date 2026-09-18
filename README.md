@@ -73,12 +73,37 @@ The current version is **v0.3.0**.
 | v0.2.0 | Variables, basic types, and expressions | Completed (within the subset below) |
 | v0.3.0 | Conditionals and loops | Completed (statement forms within the subset below) |
 | v0.4.0 | Functions, basic output, and limited typed stdin | Planned |
-| v0.5.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
-| v0.6.0 | Line input, string splitting/parsing, and basic floating-point operations | Planned |
+| v0.5.0 | f64 types, basic floating-point operations, and input/output | Planned |
+| v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
+| v0.7.0 | Line input, string splitting/parsing, and limited math functions | Planned |
 | v1.0.0 | Stable Rust subset, tests, and documentation | Planned |
 
 Each milestone must be independently buildable, testable, and verifiable.
 Planned features are not currently accepted by the translator.
+
+#### Planned floating-point support
+
+**v0.5.0** introduces `f64` separately from string handling: type annotations,
+decimal/scientific literals, the `f64` suffix, bindings, assignment, function
+parameters/returns, unary negation, `+` / `-` / `*` / `/`, corresponding compound
+assignments, and equality/ordering comparisons. Unsuffixed floating literals
+default to `f64`. Mixed `i32` / `f64` arithmetic must not silently use C implicit
+conversions; casts and floating-point remainder are outside this first stage.
+Typed stdin extends to `f64`, with complete token validation and defined parse
+error/range behavior. Output covers `println!` and limited fixed precision
+such as `{:.2}`, with explicit default-format and rounding rules.
+
+The C target is `double`, subject to validating its representation and floating
+environment. NaN, infinities, signed zero, division by zero, overflow/underflow,
+and precision must have defined behavior; integer failure rules do not carry
+over automatically. Fast-math modes that break those rules are excluded.
+Tests must define absolute/relative tolerances for finite numerical results and
+compare promised output formats exactly, including special-value cases.
+
+**v0.7.0** adds `parse::<f64>()` and limited `powi(2)` alongside line input for
+BMI-style exercises. Math functions require their own precision and
+special-value rules before acceptance. `f32` and additional math functions are
+deferred to later work. All floating-point features remain **planned**.
 
 #### Planned stdin support
 
@@ -91,18 +116,21 @@ interactive prompts. EOF, I/O errors, invalid tokens, out-of-range numbers, and
 overlong input must have defined behavior. Integration tests will feed the same
 stdin to trusted Rust and C programs and compare results.
 
-**v0.6.0** builds on array/index bounds checks to support limited patterns using
+**v0.5.0** extends typed input to `f64`, as specified above.
+
+**v0.7.0** builds on v0.5.0 floating-point support and v0.6.0 array/index bounds
+checks to support limited patterns using
 `String::new()`, `stdin().read_line(&mut buffer)`, `trim()`, `split_whitespace()`,
 token collection (including the `Vec<&str>` pattern), and `parse::<i32>()` /
-`parse::<f64>()`. It also targets `f64` literals, arithmetic, comparisons, and a
-limited `powi(2)` for BMI-style exercises. Buffer allocation and cleanup,
+`parse::<f64>()`. It also adds limited `powi(2)` for BMI-style exercises using
+the existing floating-point rules. Buffer allocation and cleanup,
 read_line append/newline behavior, UTF-8, length limits, token lifetimes,
 index bounds, EOF, parse failures, and floating-point differences must be
 specified and tested. Accepted input/parse `.unwrap()` patterns must fail in a
 controlled way. These goals do not imply general support for `String`, `Vec`,
 iterators, generics, or borrowing.
 
-Both stages are **planned**, not supported in the current v0.3.0 release.
+All input stages are **planned**, not supported in the current v0.3.0 release.
 
 ### Current release: v0.3.0
 
@@ -203,8 +231,8 @@ Value-producing control-flow expressions, `break` with a value, loop labels,
 `if let`, `while let`, and `match` are not supported. Custom functions and
 `return`, integer-range `for`, arrays, indexing, standard input, and additional
 integer types remain planned. Floating-point types are not supported yet;
-limited stdin is targeted for v0.4.0, with line/string input and `f64` targeted
-for v0.6.0 as described above.
+limited integer stdin is targeted for v0.4.0, `f64` and typed floating-point input
+for v0.5.0, and line/string input for v0.7.0 as described above.
 Async, unsafe code, raw
 pointers, generics/traits, closures, iterator chains, arbitrary macros, full
 `std`, complex ownership/borrowing, and Cargo dependencies in input programs
