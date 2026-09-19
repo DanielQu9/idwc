@@ -1,4 +1,4 @@
-//! v0.4.0 的有限輸入／flush 介面，供 Rust 範例與生成的 C 共用規格。
+//! 有限的 i32／f64 輸入與 flush 介面，供 Rust 範例與生成的 C 共用規格。
 
 use std::io::{Read, Write};
 
@@ -9,6 +9,18 @@ use std::io::{Read, Write};
 /// EOF、I/O、格式、範圍或長度錯誤會 flush stdout、輸出診斷並以狀態 101 結束。
 pub fn read_i32() -> i32 {
     match read_from(&mut std::io::stdin().lock()) {
+        Ok(value) => value,
+        Err(error) => fail(error.message()),
+    }
+}
+
+/// 讀取下一個 ASCII 空白分隔的 `f64` token，最多 128 bytes。
+///
+/// 接受十進位／科學記號及 `NaN`、`inf`、`+inf`、`-inf`。
+/// 數字溢位至無限大或非零數字下溢至零，皆回報範圍錯誤；非零 subnormal 可接受。
+/// EOF、I/O、格式、範圍或長度錯誤會輸出診斷並以狀態 101 結束。
+pub fn read_f64() -> f64 {
+    match read_float_from(&mut std::io::stdin().lock()) {
         Ok(value) => value,
         Err(error) => fail(error.message()),
     }
@@ -36,6 +48,8 @@ enum InputError {
     Invalid,
     Range,
     TooLong,
+    InvalidFloat,
+    FloatRange,
 }
 
 impl InputError {
@@ -46,6 +60,8 @@ impl InputError {
             Self::Invalid => "idwc: invalid integer\n",
             Self::Range => "idwc: integer out of range\n",
             Self::TooLong => "idwc: input token too long\n",
+            Self::InvalidFloat => "idwc: invalid float\n",
+            Self::FloatRange => "idwc: float out of range\n",
         }
     }
 }
@@ -66,7 +82,8 @@ fn space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
-fn read_from(reader: &mut impl Read) -> Result<i32, InputError> {
+/// 以固定大小緩衝區完整讀取 token，整數與浮點共用長度／I/O 規則。
+fn read_token(reader: &mut impl Read) -> Result<([u8; 128], usize), InputError> {
     let mut byte = loop {
         let byte = read_byte(reader)?.ok_or(InputError::Eof)?;
         if !space(byte) {
@@ -86,6 +103,12 @@ fn read_from(reader: &mut impl Read) -> Result<i32, InputError> {
             _ => break,
         }
     }
+    Ok((token, length))
+}
+
+/// 完整驗證十進位整數後才進行有界累積。
+fn read_from(reader: &mut impl Read) -> Result<i32, InputError> {
+    let (token, length) = read_token(reader)?;
     let negative = token[0] == b'-';
     let start = usize::from(negative || token[0] == b'+');
     let digits = &token[start..length];
@@ -112,9 +135,62 @@ fn read_from(reader: &mut impl Read) -> Result<i32, InputError> {
     Ok(if negative { -value } else { value })
 }
 
+/// 以白名單驗證浮點 token，再用 Rust 的 binary64 解析器。
+fn read_float_from(reader: &mut impl Read) -> Result<f64, InputError> {
+    let (token, length) = read_token(reader)?;
+    let token = &token[..length];
+    match token {
+        b"NaN" => return Ok(f64::NAN),
+        b"inf" | b"+inf" => return Ok(f64::INFINITY),
+        b"-inf" => return Ok(f64::NEG_INFINITY),
+        _ => {}
+    }
+    let mut index = usize::from(matches!(token[0], b'+' | b'-'));
+    let mut digits = 0;
+    let mut nonzero = false;
+    while index < length && token[index].is_ascii_digit() {
+        nonzero |= token[index] != b'0';
+        digits += 1;
+        index += 1;
+    }
+    if token.get(index) == Some(&b'.') {
+        index += 1;
+        while index < length && token[index].is_ascii_digit() {
+            nonzero |= token[index] != b'0';
+            digits += 1;
+            index += 1;
+        }
+    }
+    if digits == 0 {
+        return Err(InputError::InvalidFloat);
+    }
+    if matches!(token.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(token.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while index < length && token[index].is_ascii_digit() {
+            index += 1;
+        }
+        if start == index {
+            return Err(InputError::InvalidFloat);
+        }
+    }
+    if index != length {
+        return Err(InputError::InvalidFloat);
+    }
+    let text = std::str::from_utf8(token).map_err(|_| InputError::InvalidFloat)?;
+    let value = text.parse::<f64>().map_err(|_| InputError::InvalidFloat)?;
+    if !value.is_finite() || (nonzero && value == 0.0) {
+        return Err(InputError::FloatRange);
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InputError, read_from};
+    use super::{InputError, read_float_from, read_from};
     use std::io::{Cursor, Read};
 
     #[test]
@@ -163,6 +239,38 @@ mod tests {
         assert_eq!(
             read_from(&mut InterruptedOnce(false, Cursor::new(b"42"))),
             Ok(42)
+        );
+    }
+
+    #[test]
+    fn validates_float_tokens_and_range() {
+        for (input, expected) in [
+            (".5", 0.5),
+            ("+1.", 1.0),
+            ("-1e2", -100.0),
+            ("5e-324", f64::from_bits(1)),
+        ] {
+            assert_eq!(read_float_from(&mut input.as_bytes()), Ok(expected));
+        }
+        for input in [
+            ".", "+", "1e", "1e+", "1.2x", "0x1p2", "nan", "Infinity", "1_0", "１", "1\0",
+        ] {
+            assert_eq!(
+                read_float_from(&mut input.as_bytes()),
+                Err(InputError::InvalidFloat)
+            );
+        }
+        for input in ["1e309", "-1e309", "1e-9999", "2e-324"] {
+            assert_eq!(
+                read_float_from(&mut input.as_bytes()),
+                Err(InputError::FloatRange)
+            );
+        }
+        assert!(read_float_from(&mut "NaN".as_bytes()).unwrap().is_nan());
+        assert!(
+            read_float_from(&mut "-0e9999".as_bytes())
+                .unwrap()
+                .is_sign_negative()
         );
     }
 }

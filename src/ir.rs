@@ -23,6 +23,7 @@ pub(crate) struct Parameter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Type {
     I32,
+    F64,
     Bool,
     Unit,
 }
@@ -67,7 +68,7 @@ pub(crate) enum Statement {
 /// print!／println! 格式已解析為文字與參數索引；文字不含 NUL。
 pub(crate) enum PrintPart {
     Text(String),
-    Argument(usize),
+    Argument { index: usize, precision: Option<u8> },
 }
 
 /// 每個運算式皆帶有經語意分析確定的型別。
@@ -79,11 +80,13 @@ pub(crate) struct Expression {
 /// 值運算式；呼叫與輸入可能有副作用，必須依序求值。
 pub(crate) enum ExpressionKind {
     Integer(i32),
+    Float(f64),
     Boolean(bool),
     Variable(usize),
     Unit,
     Call(usize, Vec<Expression>),
     ReadI32,
+    ReadF64,
     FlushStdout,
     Unary(UnaryOp, Box<Expression>),
     Binary(BinaryOp, Box<Expression>, Box<Expression>),

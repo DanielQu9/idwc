@@ -139,7 +139,7 @@ fn rejects_semantic_errors() {
 
 /// v0.4.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_4() {
+fn rejects_features_outside_v0_5() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -150,7 +150,7 @@ fn rejects_features_outside_v0_4() {
         "fn main() { let x: &i32 = &1; }",
         "fn main() { let x: std::primitive::i32 = 1; }",
         "fn main() { let x = 1u32; }",
-        "fn main() { let x = 1.0; }",
+        "fn main() { let x = 1.0f32; }",
         "fn main() { let x = 'a'; }",
         r#"fn main() { let x = "text"; }"#,
         "fn main() { let x = [1, 2]; }",
@@ -290,7 +290,7 @@ fn rejects_unsupported_control_flow_forms() {
         "fn main() { loop { #[cfg(any())] continue; } }",
         "fn main() { while false { #![allow(unused)] } }",
         "fn main() { loop { #![allow(unused)] break; } }",
-        "fn main() { if false { let x = 1.0; } }",
+        "fn main() { if false { let x = 1.0f32; } }",
     ] {
         let result = transpile(source);
         assert!(
@@ -381,10 +381,10 @@ fn rejects_unsupported_function_and_io_forms() {
         "fn main() {} fn f(x: &i32) {}",
         "fn main() {} fn f((x, y): (i32, i32)) {}",
         "fn main() {} fn f(x: ()) {}",
-        "fn main() {} fn f() -> f64 { 1.0 }",
+        "fn main() {} fn f() -> f32 { 1.0 }",
         "fn main() {} fn f() -> i32 { if true { 1 } else { 2 } }",
         "fn main() { let x = idwc::io::flush_stdout(); }",
-        "fn main() { idwc::io::read_f64(); }",
+        "fn main() { idwc::io::read_f32(); }",
         "fn main() { std::io::stdin(); }",
         "fn main() { idwc::io::read_i32::<i32>(); }",
         "fn main() { println!(\"{}\", ()); }",
@@ -395,6 +395,70 @@ fn rejects_unsupported_function_and_io_forms() {
         assert!(
             matches!(result, Err(TranspileError::Unsupported(_))),
             "{source}：{result:?}"
+        );
+    }
+}
+
+/// f64 字面量、運算、傳值及精度格式皆經過型別檢查。
+#[test]
+fn accepts_floating_point_subset() {
+    for source in [
+        include_str!("../examples/floating_point.rs"),
+        "fn main() { let x = 1f64; let y = -1f64; let z = 1_2.5_0e-1f64; }",
+        "fn main() { let mut x: f64 = 1.0; x += 2.0; x -= 1.0; x *= 3.0; x /= 2.0; x = -x; }",
+        "fn main() { let x = 1e-9999; println!(\"{} {:.0} {:.18}\", x, x, x); }",
+        "fn main() { let x = idwc::io::read_f64(); println!(\"{}\", echo(x)); } fn echo(x: f64) -> f64 { x }",
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn rejects_floating_point_type_errors() {
+    for source in [
+        "fn main() { let x: i32 = 1.0; }",
+        "fn main() { let x: f64 = 1; }",
+        "fn main() { let x = 1.0 + 1; }",
+        "fn main() { let x = 1 + 1.0; }",
+        "fn main() { let x = 1.0 == 1; }",
+        "fn main() { let x = !1.0; }",
+        "fn main() { if 1.0 {} }",
+        "fn main() { let mut x = 1.0; x += 1; }",
+        "fn main() { let mut x = 1; x = 1.0; }",
+        "fn main() { f(1); } fn f(x: f64) {}",
+        "fn main() {} fn f() -> f64 { 1 }",
+        "fn main() { println!(\"{:.2}\", 1); }",
+        "fn main() { println!(\"{:.2}\", true); }",
+        "fn main() { let x = 1e9999; }",
+        "fn main() { idwc::io::read_f64(1); }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Semantic(_))),
+            "{source}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_floating_point_forms() {
+    for source in [
+        "fn main() { let x = 1f32; }",
+        "fn main() { let x = 0b1f64; }",
+        "fn main() { let x = 1.0 % 2.0; }",
+        "fn main() { let mut x = 1.0; x %= 2.0; }",
+        "fn main() { let x = 1 as f64; }",
+        "fn main() { let x = 1.0.powi(2); }",
+        "fn main() { println!(\"{:.19}\", 1.0); }",
+        "fn main() { println!(\"{:.}\", 1.0); }",
+        "fn main() { println!(\"{:.2e}\", 1.0); }",
+        "fn main() { println!(\"{:.precision$}\", 1.0); }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Unsupported(_))),
+            "{source}: {result:?}"
         );
     }
 }

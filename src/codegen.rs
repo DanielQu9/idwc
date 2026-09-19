@@ -13,11 +13,17 @@ pub(crate) fn generate(program: &Program) -> String {
         typed: false,
         helpers: BTreeSet::new(),
         in_main: false,
+        floating: false,
     };
     let mut prototypes = String::new();
     let mut functions = String::new();
     for function in &program.functions {
         generator.typed = true;
+        generator.floating |= function.return_type == Type::F64
+            || function
+                .parameters
+                .iter()
+                .any(|parameter| parameter.ty == Type::F64);
         let signature = function_signature(function);
         prototypes.push_str(&format!("{signature};\n"));
         functions.push_str(&format!("{signature} {{\n"));
@@ -35,6 +41,9 @@ pub(crate) fn generate(program: &Program) -> String {
     generator.in_main = true;
     generator.statements(&program.statements);
     generator.line("return 0;");
+    if generator.floating {
+        generator.helpers.insert("float");
+    }
     let mut output = String::from("#include <stdio.h>\n");
     if generator.typed {
         output.push_str(
@@ -44,6 +53,9 @@ pub(crate) fn generate(program: &Program) -> String {
     if !generator.helpers.is_empty() {
         output.push_str("#include <signal.h>\n");
     }
+    if generator.floating {
+        output.push_str("#include <float.h>\n#include <math.h>\n#include <fenv.h>\n#include <locale.h>\n#include <string.h>\n");
+    }
     output.push('\n');
     output.push_str(&runtime_helpers(&generator.helpers));
     if !prototypes.is_empty() {
@@ -52,6 +64,9 @@ pub(crate) fn generate(program: &Program) -> String {
         output.push_str(&functions);
     }
     output.push_str("int main(void) {\n");
+    if generator.floating {
+        output.push_str("    idwc_float_init();\n");
+    }
     output.push_str(&generator.body);
     output.push_str("}\n");
     output
@@ -65,6 +80,7 @@ struct Generator {
     typed: bool,
     helpers: BTreeSet<&'static str>,
     in_main: bool,
+    floating: bool,
 }
 
 impl Generator {
@@ -200,12 +216,20 @@ impl Generator {
                 PrintPart::Text(text) if !text.is_empty() => {
                     self.line(&format!("fputs(\"{}\", stdout);", escape_string(text)));
                 }
-                PrintPart::Argument(index) => match arguments[*index].ty {
+                PrintPart::Argument { index, precision } => match arguments[*index].ty {
                     Type::I32 => self.line(&format!("printf(\"%\" PRId32, {});", values[*index])),
                     Type::Bool => self.line(&format!(
                         "fputs({} ? \"true\" : \"false\", stdout);",
                         values[*index]
                     )),
+                    Type::F64 => {
+                        self.helpers.insert("float_print");
+                        self.line(&format!(
+                            "idwc_print_f64({}, {});",
+                            values[*index],
+                            precision.map_or(-1, i32::from)
+                        ));
+                    }
                     Type::Unit => unreachable!("格式參數已驗證為 i32 或 bool"),
                 },
                 _ => {}
@@ -219,11 +243,28 @@ impl Generator {
     /// 運算式產生原子值或已求值的暫存值；左右 operand 依序求值。
     fn expression(&mut self, expression: &Expression) -> String {
         self.typed = true;
+        self.floating |= expression.ty == Type::F64;
         let value = match &expression.kind {
             ExpressionKind::Unit => return "0".into(),
             ExpressionKind::ReadI32 => {
                 self.helpers.insert("read");
+                self.helpers.insert("token");
                 "idwc_read_i32()".into()
+            }
+            ExpressionKind::ReadF64 => {
+                self.helpers.insert("float_read");
+                self.helpers.insert("token");
+                "idwc_read_f64()".into()
+            }
+            ExpressionKind::Float(value) => {
+                let bits = value.to_bits();
+                let exponent = (bits >> 52) as i32;
+                let mantissa = bits & ((1u64 << 52) - 1);
+                return if exponent == 0 {
+                    format!("0x{mantissa:x}p-1074")
+                } else {
+                    format!("0x{:x}p{}", mantissa | (1u64 << 52), exponent - 1075)
+                };
             }
             ExpressionKind::FlushStdout => {
                 self.helpers.insert("flush");
@@ -261,8 +302,12 @@ impl Generator {
                 match op {
                     UnaryOp::Not => format!("(!{operand})"),
                     UnaryOp::Negate => {
-                        self.helpers.insert("neg");
-                        format!("idwc_neg({operand})")
+                        if expression.ty == Type::F64 {
+                            format!("(-{operand})")
+                        } else {
+                            self.helpers.insert("neg");
+                            format!("idwc_neg({operand})")
+                        }
                     }
                 }
             }
@@ -286,6 +331,19 @@ impl Generator {
                     return temp;
                 }
                 let right = self.expression(right);
+                if expression.ty == Type::F64 {
+                    let operator = match op {
+                        BinaryOp::Add => "+",
+                        BinaryOp::Subtract => "-",
+                        BinaryOp::Multiply => "*",
+                        BinaryOp::Divide => {
+                            self.helpers.insert("float_div");
+                            return self.float_temp(&format!("idwc_fdiv({left}, {right})"));
+                        }
+                        _ => unreachable!("浮點餘數已拒絕"),
+                    };
+                    return self.float_temp(&format!("({left} {operator} {right})"));
+                }
                 match op {
                     BinaryOp::Add
                     | BinaryOp::Subtract
@@ -318,10 +376,22 @@ impl Generator {
             }
         };
         let temp = self.temp_name();
+        let qualifier = if expression.ty == Type::F64 {
+            "const volatile"
+        } else {
+            "const"
+        };
         self.line(&format!(
-            "const {} {temp} = {value};",
+            "{qualifier} {} {temp} = {value};",
             c_type(expression.ty)
         ));
+        temp
+    }
+
+    /// volatile 儲存每一步 binary64 結果，避免跨敘述 FMA 或延伸精度融合。
+    fn float_temp(&mut self, value: &str) -> String {
+        let temp = self.temp_name();
+        self.line(&format!("const volatile double {temp} = {value};"));
         temp
     }
 }
@@ -330,6 +400,7 @@ impl Generator {
 fn c_type(ty: Type) -> &'static str {
     match ty {
         Type::I32 => "int32_t",
+        Type::F64 => "double",
         Type::Bool => "bool",
         Type::Unit => "void",
     }
@@ -372,8 +443,16 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
             "static int32_t idwc_checked(int64_t value) {\n    if (value < INT32_MIN || value > INT32_MAX) {\n        idwc_fail(\"idwc: integer overflow\\n\");\n    }\n    return (int32_t)value;\n}\n\n",
         );
     }
+    if helpers.contains("token") {
+        output.push_str(include_str!("runtime/token.c"));
+    }
     for helper in helpers {
         match *helper {
+            "token" => {}
+            "float" => output.push_str(include_str!("runtime/float.c")),
+            "float_print" => output.push_str(include_str!("runtime/float_print.c")),
+            "float_read" => output.push_str(include_str!("runtime/float_read.c")),
+            "float_div" => output.push_str("static double idwc_fdiv(double a, double b) {\n    if (b == 0.0) {\n        if (a == 0.0 || isnan(a)) { return NAN; }\n        return signbit(a) != signbit(b) ? -INFINITY : INFINITY;\n    }\n    return a / b;\n}\n\n"),
             "flush" => output.push_str(
                 "static void idwc_flush_stdout(void) {\n#ifdef SIGPIPE\n    signal(SIGPIPE, SIG_IGN);\n#endif\n    if (fflush(stdout) == EOF || ferror(stdout)) {\n        idwc_fail(\"idwc: stdout flush error\\n\");\n    }\n}\n\n",
             ),
@@ -403,37 +482,9 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     output
 }
 
-const INPUT_HELPER: &str = r#"static bool idwc_space(int byte) {
-    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r'
-        || byte == '\v' || byte == '\f';
-}
-
-static int32_t idwc_read_i32(void) {
-    unsigned char token[128];
-    size_t length = 0;
-    int byte;
-    do {
-        byte = fgetc(stdin);
-        if (byte == EOF) {
-            idwc_fail(ferror(stdin) ? "idwc: stdin I/O error\n" : "idwc: unexpected EOF\n");
-        }
-    } while (idwc_space(byte));
-    for (;;) {
-        if (length == sizeof token) {
-            idwc_fail("idwc: input token too long\n");
-        }
-        token[length++] = (unsigned char)byte;
-        byte = fgetc(stdin);
-        if (byte == EOF) {
-            if (ferror(stdin)) {
-                idwc_fail("idwc: stdin I/O error\n");
-            }
-            break;
-        }
-        if (idwc_space(byte)) {
-            break;
-        }
-    }
+const INPUT_HELPER: &str = r#"static int32_t idwc_read_i32(void) {
+    unsigned char token[129];
+    size_t length = idwc_read_token(token);
     bool negative = token[0] == '-';
     size_t start = (negative || token[0] == '+') ? 1 : 0;
     if (start == length) {

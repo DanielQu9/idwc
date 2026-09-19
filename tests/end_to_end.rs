@@ -63,10 +63,29 @@ fn run_with_timeout(command: &mut Command) -> Output {
 }
 
 fn wait_with_timeout(mut child: Child) -> Output {
+    // 同時排空 pipes，讓浮點 subnormal／大規模格式測試不被 pipe 容量卡住。
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    });
     let start = Instant::now();
     loop {
         if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+            return Output {
+                status: child.wait().unwrap(),
+                stdout: stdout.map_or_else(Vec::new, |reader| reader.join().unwrap()),
+                stderr: stderr.map_or_else(Vec::new, |reader| reader.join().unwrap()),
+            };
         }
         if start.elapsed() > Duration::from_secs(5) {
             child.kill().unwrap();
@@ -84,8 +103,14 @@ fn run_with_input(binary: &Path, input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
-    wait_with_timeout(child)
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = wait_with_timeout(child);
+    if let Err(error) = writer.join().unwrap() {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    output
 }
 
 /// Rust 參考程式引用相同的公開 I/O 實作；轉譯器只解析原始的受限程式。
@@ -121,6 +146,7 @@ fn compile_pair(dir: &TestDir, source: &str) -> (PathBuf, PathBuf) {
                 "-fno-sanitize-recover=undefined",
             ])
             .arg(&c_source)
+            .arg("-lm")
             .arg("-o")
             .arg(&c_binary),
     );
@@ -561,7 +587,7 @@ fn cli_reports_errors_without_overwriting_output() {
     let dir = TestDir::new();
     let input = dir.file("invalid.rs");
     let output = dir.file("output.c");
-    fs::write(&input, "fn main() { let x = 1.0; }").unwrap();
+    fs::write(&input, "fn main() { let x = 1.0f32; }").unwrap();
     fs::write(&output, "existing output").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
         .arg(&input)
@@ -802,4 +828,193 @@ fn explicit_flush_reports_io_failure() {
         assert_eq!(output.status.code(), Some(101), "{binary:?}: {output:?}");
         assert_eq!(output.stderr, b"idwc: stdout flush error\n");
     }
+}
+
+/// 數值用絕對／相對誤差比對；格式与特殊值另採精確輸出比對。
+#[test]
+fn floating_point_operations_and_formats_match_rust() {
+    let dir = TestDir::new();
+    let source = r#"fn main() {
+        let mut n: f64 = 1.5; n += 2.25; n -= 0.5; n *= 3.0; n /= 2.0;
+        println!("{} {:.2} {:.18}", n, n, -n);
+        println!("{} {} {} {} {} {}", n < 5.0, n <= 5.0, n > 5.0, n >= 5.0, n == 5.0, n != 5.0);
+        println!("{} {}", divide(1f64, 3f64), multiply(0.1, 0.2));
+        println!("{:.0} {:.0} {:.2} {:.2}", 2.5, 3.5, 1.125, 1.375);
+        println!("{} {} {:.2} {:.0}", -0.0, 0.0, -0.0, -0.0);
+        let zero = 0.0; let nan = zero / zero;
+        println!("{} {} {} {:.2} {:.2}", 1.0 / zero, -1.0 / zero, nan, nan, 1.0 / -zero);
+        println!("{} {} {} {}", nan == nan, nan != nan, nan < 1.0, nan >= 1.0);
+        println!("{} {} {}", 1e308 * 1e308, 5e-324 / 2.0, 1.0 / -0.0);
+        println!("{} {}", false && (divide(1.0, zero) < 0.0), true || (nan == nan));
+    }
+    fn divide(a: f64, b: f64) -> f64 { a / b }
+    fn multiply(a: f64, b: f64) -> f64 { a * b }"#;
+    let (rust, c) = compile_pair(&dir, source);
+    let rust = run_with_input(&rust, b"");
+    let c = run_with_input(&c, b"");
+    assert!(c.status.success(), "{c:?}");
+    assert_same_output(&rust, &c);
+    let text = String::from_utf8(c.stdout).unwrap();
+    let numbers = text
+        .lines()
+        .nth(2)
+        .unwrap()
+        .split_whitespace()
+        .map(|number| number.parse::<f64>().unwrap())
+        .collect::<Vec<_>>();
+    for (actual, expected) in numbers.iter().zip([1.0 / 3.0, 0.02]) {
+        assert!((actual - expected).abs() <= 1e-15 + 1e-14 * expected.abs());
+    }
+}
+
+/// 固定的偽隨機 bit patterns、十進位邊界與 subnormal，比對最短及固定格式。
+#[test]
+fn floating_point_format_boundaries_match_rust() {
+    let dir = TestDir::new();
+    let source = r#"fn main() { let count = idwc::io::read_i32(); let mut n = 0;
+        while n < count { let x = idwc::io::read_f64(); println!("{} {:.2} {:.18}", x, x, x); n += 1; } }"#;
+    let (rust, c) = compile_pair(&dir, source);
+    let mut values = vec![
+        f64::MIN,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::from_bits(2),
+        f64::from_bits((1 << 52) - 1),
+        0.1,
+        0.3,
+        1e-6,
+        1e-7,
+        1e20,
+        1e23,
+        1.2345678901234567,
+        9.999999999999998,
+        999999999999999.9,
+        0.0,
+        -0.0,
+        // 這些精確可表示的中點刻意區分最短格式與固定精度的 tie 規則。
+        1e15 + 0.25,
+        -(1e15 + 0.25),
+        1e15 + 0.75,
+        1e14 + 0.125,
+        1e14 + 0.625,
+    ];
+    for exponent in -1022..=1023 {
+        if exponent % 31 == 0 {
+            let bits = ((exponent + 1023) as u64) << 52;
+            values.extend([
+                f64::from_bits(bits - 1),
+                f64::from_bits(bits),
+                f64::from_bits(bits + 1),
+            ]);
+        }
+    }
+    let mut state = 0x4d595df4d0f33173u64;
+    for _ in 0..512 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let value = f64::from_bits(state);
+        if value.is_finite() {
+            values.push(value);
+        }
+    }
+    let mut input = format!("{}\n", values.len());
+    for value in values {
+        input.push_str(&format!("{value:.17e}\n"));
+    }
+    let rust = run_with_input(&rust, input.as_bytes());
+    let c = run_with_input(&c, input.as_bytes());
+    assert!(c.status.success(), "{c:?}");
+    // 行別診斷避免一次印出所有巨大的十進位表示。
+    assert_eq!(rust.status.code(), c.status.code());
+    assert_eq!(rust.stderr, c.stderr);
+    let rust_text = String::from_utf8(rust.stdout).unwrap();
+    let c_text = String::from_utf8(c.stdout).unwrap();
+    assert_eq!(rust_text.lines().count(), c_text.lines().count());
+    for (index, (rust, c)) in rust_text.lines().zip(c_text.lines()).enumerate() {
+        assert_eq!(rust, c, "格式案例 {index}");
+    }
+}
+
+#[test]
+fn floating_point_stdin_matches_rust() {
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(
+        &dir,
+        r#"fn main() { print!("input: ");
+        idwc::io::flush_stdout(); let x = idwc::io::read_f64(); println!("{} {:.2}", x, x);
+        println!("{}", idwc::io::read_i32()); }"#,
+    );
+    let mut cases: Vec<(Vec<u8>, Option<&str>)> = vec![
+        (b"+.5 1".to_vec(), None),
+        (b"-1.25e+2\n-2".to_vec(), None),
+        (b"1. 3".to_vec(), None),
+        (b"-0e9999 4".to_vec(), None),
+        (b"NaN 5".to_vec(), None),
+        (b"+inf 6".to_vec(), None),
+        (b"-inf 7".to_vec(), None),
+        (b"inf 8".to_vec(), None),
+        (b"5e-324 9".to_vec(), None),
+        (b"1.7976931348623157e308 10".to_vec(), None),
+        (b"".to_vec(), Some("unexpected EOF")),
+        (b" \t\n".to_vec(), Some("unexpected EOF")),
+        (b"1.5".to_vec(), Some("unexpected EOF")),
+        (b"1e309 1".to_vec(), Some("float out of range")),
+        (b"-1e9999 1".to_vec(), Some("float out of range")),
+        (b"1e-9999 1".to_vec(), Some("float out of range")),
+        (b"2e-324 1".to_vec(), Some("float out of range")),
+    ];
+    for input in [
+        "+", ".", "1e", "1e+", "1e-", "1.2x", "1.2.3", "0x1p2", "nan", "Infinity", "1_0", "１",
+        "1\0",
+    ] {
+        cases.push((format!("{input} 1").into_bytes(), Some("invalid float")));
+    }
+    let mut boundary = vec![b'0'; 128];
+    boundary.extend_from_slice(b" 1");
+    cases.push((boundary, None));
+    cases.push((vec![b'0'; 129], Some("input token too long")));
+    for (input, error) in cases {
+        let rust = run_with_input(&rust, &input);
+        let c = run_with_input(&c, &input);
+        assert_same_output(&rust, &c);
+        match error {
+            None => assert!(c.status.success(), "{input:?}"),
+            Some(error) => {
+                assert_eq!(c.status.code(), Some(101));
+                assert_eq!(c.stderr, format!("idwc: {error}\n").as_bytes());
+            }
+        }
+    }
+    let (rust, c) = compile_pair(&dir, include_str!("../examples/floating_point.rs"));
+    let rust = run_with_input(&rust, b"70 1.75\n");
+    let c = run_with_input(&c, b"70 1.75\n");
+    assert_same_output(&rust, &c);
+    assert_eq!(
+        c.stdout,
+        b"Enter weight (kg) and height (m): BMI = 22.86, below 25 = true\n"
+    );
+}
+
+#[test]
+fn generated_floating_point_c_rejects_fast_math() {
+    let dir = TestDir::new();
+    let source = dir.file("fast.c");
+    fs::write(
+        &source,
+        idwc::transpile("fn main() { let x = 1.0; }").unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(c_compiler())
+        .args(["-std=c17", "-ffast-math"])
+        .arg(source)
+        .arg("-lm")
+        .arg("-o")
+        .arg(dir.file("fast"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires fast-math to be disabled"));
 }

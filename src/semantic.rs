@@ -370,7 +370,7 @@ impl Analyzer<'_> {
         })
     }
 
-    /// print!／println! 參數只接受型別已知的 i32／bool 運算式。
+    /// print!／println! 接受基本值；固定精度格式另外要求 f64。
     fn print(&self, mac: &syn::Macro) -> Result<Statement, TranspileError> {
         let (parts, arguments) = crate::format::parse(mac)?;
         let arguments = arguments
@@ -379,6 +379,15 @@ impl Analyzer<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         for argument in &arguments {
             require_value(argument.ty)?;
+        }
+        for part in &parts {
+            if let crate::ir::PrintPart::Argument {
+                index,
+                precision: Some(_),
+            } = part
+            {
+                same_type(Type::F64, arguments[*index].ty)?;
+            }
         }
         Ok(Statement::Print {
             parts,
@@ -427,6 +436,22 @@ impl Analyzer<'_> {
             }
             Expr::Call(call) if call.attrs.is_empty() => self.call(call),
             Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
+                Lit::Float(float) => {
+                    if !matches!(float.suffix(), "" | "f64") {
+                        return Err(TranspileError::Unsupported("浮點字面量僅接受 f64 後綴"));
+                    }
+                    float_expression(float.base10_digits())
+                }
+                Lit::Int(integer) if integer.suffix() == "f64" => {
+                    let spelling = integer.to_string();
+                    if spelling.starts_with("0x")
+                        || spelling.starts_with("0o")
+                        || spelling.starts_with("0b")
+                    {
+                        return Err(TranspileError::Unsupported("浮點字面量僅接受十進位"));
+                    }
+                    float_expression(integer.base10_digits())
+                }
                 Lit::Int(integer) => Ok(Expression {
                     ty: Type::I32,
                     kind: ExpressionKind::Integer(integer_value(integer, false)?),
@@ -454,6 +479,7 @@ impl Analyzer<'_> {
                 // Rust 允許 -2147483648（也允許括號），但正的 2147483648 不是 i32。
                 if matches!(op, UnaryOp::Negate)
                     && let Some(integer) = literal_integer(&unary.expr)
+                    && integer.suffix() != "f64"
                 {
                     return Ok(Expression {
                         ty,
@@ -461,9 +487,13 @@ impl Analyzer<'_> {
                     });
                 }
                 let operand = self.expression(&unary.expr)?;
-                same_type(ty, operand.ty)?;
+                if matches!(op, UnaryOp::Negate) {
+                    require_number(operand.ty)?;
+                } else {
+                    same_type(ty, operand.ty)?;
+                }
                 Ok(Expression {
-                    ty,
+                    ty: operand.ty,
                     kind: ExpressionKind::Unary(op, Box::new(operand)),
                 })
             }
@@ -525,6 +555,10 @@ impl Analyzer<'_> {
                     ty: Type::I32,
                     kind: ExpressionKind::ReadI32,
                 }),
+                "read_f64" => Ok(Expression {
+                    ty: Type::F64,
+                    kind: ExpressionKind::ReadF64,
+                }),
                 "flush_stdout" => Ok(Expression {
                     ty: Type::Unit,
                     kind: ExpressionKind::FlushStdout,
@@ -571,7 +605,7 @@ impl Analyzer<'_> {
     }
 }
 
-/// 型別註記接受未限定路徑的 i32／bool，以及函式的 unit 回傳型別。
+/// 型別註記接受未限定路徑的基本型別，以及函式的 unit 回傳型別。
 fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
     if let syn::Type::Tuple(tuple) = ty
         && tuple.elems.is_empty()
@@ -587,9 +621,12 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
         if path.path.is_ident("bool") {
             return Ok(Type::Bool);
         }
+        if path.path.is_ident("f64") {
+            return Ok(Type::F64);
+        }
     }
     Err(TranspileError::Unsupported(
-        "型別僅接受 i32、bool 與 unit 回傳型別",
+        "型別僅接受 i32、f64、bool 與 unit 回傳型別",
     ))
 }
 
@@ -618,12 +655,19 @@ fn binary_expression(
             Type::Bool
         }
         BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
-            same_type(Type::I32, left.ty)?;
+            require_number(left.ty)?;
             Type::Bool
         }
-        _ => {
+        BinaryOp::Remainder => {
+            if left.ty == Type::F64 {
+                return Err(TranspileError::Unsupported("尚未支援浮點餘數"));
+            }
             same_type(Type::I32, left.ty)?;
             Type::I32
+        }
+        _ => {
+            require_number(left.ty)?;
+            left.ty
         }
     };
     Ok(Expression {
@@ -632,11 +676,37 @@ fn binary_expression(
     })
 }
 
+/// 浮點字面量採 binary64；無限大字面量拒絕翻譯，極小值可捨入至零。
+fn float_expression(digits: &str) -> Result<Expression, TranspileError> {
+    let value = digits
+        .parse::<f64>()
+        .map_err(|_| TranspileError::Semantic("無效的 f64 字面量".into()))?;
+    if !value.is_finite() {
+        return Err(TranspileError::Semantic(
+            "浮點字面量超出 f64 有限範圍".into(),
+        ));
+    }
+    Ok(Expression {
+        ty: Type::F64,
+        kind: ExpressionKind::Float(value),
+    })
+}
+
+/// 算術接受相同型別的整數或浮點數，bool 不做隱式轉換。
+fn require_number(ty: Type) -> Result<(), TranspileError> {
+    if !matches!(ty, Type::I32 | Type::F64) {
+        return Err(TranspileError::Semantic(
+            "型別不符：此運算僅接受 i32 或 f64".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// unit 僅用於函式回傳，不建立 unit 變數、參數或格式引數。
 fn require_value(ty: Type) -> Result<(), TranspileError> {
     if ty == Type::Unit {
         return Err(TranspileError::Unsupported(
-            "此處僅接受 i32 或 bool，不接受 unit 值",
+            "此處僅接受 i32、f64 或 bool，不接受 unit 值",
         ));
     }
     Ok(())

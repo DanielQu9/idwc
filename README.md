@@ -65,7 +65,7 @@ translation capabilities below distinguish completed work from planned features.
 
 ### Milestones
 
-The current version is **v0.4.0**.
+The current version is **v0.5.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -73,37 +73,78 @@ The current version is **v0.4.0**.
 | v0.2.0 | Variables, basic types, and expressions | Completed (within the subset below) |
 | v0.3.0 | Conditionals and loops | Completed (statement forms within the subset below) |
 | v0.4.0 | Functions, basic output, and limited typed stdin | Completed (within the subset below) |
-| v0.5.0 | f64 types, basic floating-point operations, and input/output | Planned |
+| v0.5.0 | f64 types, basic floating-point operations, and input/output | Completed (within the subset below) |
 | v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
 | v0.7.0 | Line input, string splitting/parsing, and limited math functions | Planned |
 | v1.0.0 | Stable Rust subset, tests, and documentation | Planned |
+| v1.1.0 | Optional Stupid Mode for relaxed, readable C output | Planned |
 
 Each milestone must be independently buildable, testable, and verifiable.
 Planned features are not currently accepted by the translator.
 
-#### Planned floating-point support
+#### Planned Stupid Mode (v1.1.0)
 
-**v0.5.0** introduces `f64` separately from string handling: type annotations,
+After the strict subset reaches v1.0.0, `-s` / `--stupid` will select an
+explicitly relaxed translation profile:
+
+```bash
+idwc --stupid input.rs -o output.c
+```
+
+Its priorities are readable C, original names where safe, and compact output;
+exact Rust/C semantic equivalence comes after those goals. Strict translation
+remains the default and the existing `transpile(source)` API always stays
+strict. A separate options API will carry the mode into semantic analysis and
+code generation instead of putting translation rules in the CLI.
+
+Planned behavior:
+
+- Use direct, idiomatic C expressions and control flow where possible. The mode
+  may omit selected helpers for checked arithmetic, division, array bounds,
+  full input validation, exact evaluation order, floating environment checks,
+  and Rust-compatible float formatting. Every omitted guarantee must be listed
+  in the final mode contract.
+- Permit documented floating-point precision and presentation differences,
+  using ordinary C `double` operations and simple `printf` formats where that
+  produces substantially cleaner C. Such output is never described as strictly
+  equivalent to Rust.
+- Preserve source variable and function names when they are valid, safe C
+  identifiers. C keywords, reserved identifiers, shadowed bindings, generated
+  helpers, and duplicate names receive deterministic readable suffixes such as
+  `value_2`. Necessary temporaries use descriptive names.
+- Keep syn parsing, the AST whitelist, scope/name resolution, and basic type
+  checking. Unsupported AST, undefined names, and programs that cannot produce
+  valid C still fail explicitly; the mode does not become text replacement.
+- Add a short generated-file comment and one CLI notice identifying relaxed
+  output and its weaker guarantees.
+
+Acceptance tests will keep the complete strict suite unchanged, compile C17
+snapshots for readable Stupid Mode output, and document intentional divergence
+cases for precision, overflow, bounds, and evaluation order. This mode is
+planned for v1.1.0 and is not implemented by the current CLI.
+
+#### Floating-point support and next stages
+
+**v0.5.0** supports `f64` separately from string handling: type annotations,
 decimal/scientific literals, the `f64` suffix, bindings, assignment, function
 parameters/returns, unary negation, `+` / `-` / `*` / `/`, corresponding compound
 assignments, and equality/ordering comparisons. Unsuffixed floating literals
 default to `f64`. Mixed `i32` / `f64` arithmetic must not silently use C implicit
 conversions; casts and floating-point remainder are outside this first stage.
-Typed stdin extends to `f64`, with complete token validation and defined parse
-error/range behavior. Output covers `println!` and limited fixed precision
-such as `{:.2}`, with explicit default-format and rounding rules.
+Typed stdin uses `idwc::io::read_f64()`, with complete token validation and
+defined parse error/range behavior. `print!` / `println!` accept default `{}`
+and fixed precision `{:.0}` through `{:.18}` for `f64`.
 
-The C target is `double`, subject to validating its representation and floating
-environment. NaN, infinities, signed zero, division by zero, overflow/underflow,
-and precision must have defined behavior; integer failure rules do not carry
-over automatically. Fast-math modes that break those rules are excluded.
-Tests must define absolute/relative tolerances for finite numerical results and
-compare promised output formats exactly, including special-value cases.
+The C target is binary64 `double`, validated at compilation and startup.
+NaN, infinities, signed zero, division by zero, and overflow/underflow use the
+rules below; integer failure rules do not apply. Fast-math is rejected.
+Tests compare promised formats exactly and use explicit absolute/relative
+tolerances for finite numerical results, including boundary and special cases.
 
 **v0.7.0** adds `parse::<f64>()` and limited `powi(2)` alongside line input for
 BMI-style exercises. Math functions require their own precision and
 special-value rules before acceptance. `f32` and additional math functions are
-deferred to later work. All floating-point features remain **planned**.
+deferred to later work. These additional features remain **planned**.
 
 #### Stdin support and next stages
 
@@ -129,9 +170,9 @@ specified and tested. Accepted input/parse `.unwrap()` patterns must fail in a
 controlled way. These goals do not imply general support for `String`, `Vec`,
 iterators, generics, or borrowing.
 
-Floating-point and line/string input remain **planned**.
+Line/string input remains **planned**.
 
-### Current release: v0.4.0
+### Current release: v0.5.0
 
 Requires Rust 1.88 or newer (edition 2024) to build the transpiler, and Clang or GCC
 to compile the generated C17 program.
@@ -177,6 +218,20 @@ printf '3 4\n' | /tmp/idwc-functions
 printf '3 4\n' | cargo run --example functions_stdin
 ```
 
+The floating-point example calculates BMI using typed input and `{:.2}`:
+
+```bash
+cargo run -- examples/floating_point.rs -o /tmp/idwc-floating.c
+clang -std=c17 /tmp/idwc-floating.c -lm -o /tmp/idwc-floating
+printf '70 1.75\n' | /tmp/idwc-floating
+# Enter weight (kg) and height (m): BMI = 22.86, below 25 = true
+printf '70 1.75\n' | cargo run --example floating_point
+```
+
+Link floating-point C programs with `-lm` (required on some platforms).
+This example uses no String, Vec, casts, or `powi`; those input patterns remain
+outside this release's subset.
+
 To use the `idwc` executable directly, run `cargo build` and then
 `./target/debug/idwc examples/hello.rs -o /tmp/idwc-hello.c`.
 Use `--help` for CLI usage. Input must have a `.rs` extension and output `.c`.
@@ -198,8 +253,8 @@ fn main() {
 
 - Exactly one private `fn main()`, without parameters, generics, attributes,
   modifiers, or an explicit return type.
-- Additional private, nongeneric functions with `i32` / `bool` value parameters
-  (including `mut` parameters) and `i32` / `bool` / unit returns. Omitted return
+- Additional private, nongeneric functions with `i32` / `f64` / `bool` value parameters
+  (including `mut` parameters) and `i32` / `f64` / `bool` / unit returns. Omitted return
   types mean unit; helpers may explicitly return `()`. Forward calls and
   recursion are supported; calling `main` and indirect calls are rejected.
 - `return;`, `return ();`, and typed `return value;`; typed functions also
@@ -208,15 +263,21 @@ fn main() {
   value expression, or returns in both `if` / `else` branches. A loop alone does
   not establish a guaranteed return. Parameters are copied and each function
   has independent local scopes. Unit bindings and unit parameters are rejected.
-- Initialized `let` and `let mut` bindings, with optional `i32` or `bool`
+- Initialized `let` and `let mut` bindings, with optional `i32`, `f64`, or `bool`
   annotations. Unsuffixed integers default to `i32`; the `i32` suffix is allowed.
 - Integer literals in decimal, hex, octal, and binary, including `i32::MIN`
   written as `-2147483648`. Paths such as `i32::MIN` are not supported yet.
-- Arithmetic `+`, `-`, `*`, `/`, `%`, unary `-`, integer comparisons
-  `<`, `<=`, `>`, `>=`, and equality `==` / `!=` for either supported type.
+- Arithmetic `+`, `-`, `*`, `/`, unary `-`, and comparisons `<`, `<=`, `>`, `>=`
+  for matching `i32` or `f64` operands; `%` is integer-only. Equality `==` / `!=`
+  also supports `bool`. Mixed numeric types are rejected.
+- Decimal/scientific floating literals defaulting to `f64`, with optional `f64`
+  suffix and underscores (including `1f64`). Nondecimal floating literals and
+  `f32` are rejected. Infinite literals are translation errors; tiny literals
+  round to representable subnormals or zero.
 - Boolean `!`, `&&`, and `||`, with short-circuit evaluation.
 - Plain assignment and arithmetic compound assignment (`+=`, `-=`, `*=`, `/=`,
-  `%=`) to mutable bindings. Assignment is a statement, not a value expression.
+  `%=`) to mutable bindings; `%=` is integer-only. Assignment is a statement,
+  not a value expression.
 - Multiple statements, nested statement blocks, same-scope and nested shadowing,
   and optional empty main. Value-returning blocks are not supported.
 - Statement-form `if` / `else if` / `else` with `bool` conditions and
@@ -226,13 +287,14 @@ fn main() {
   before every iteration.
 - Unlabeled `break` and `continue` inside a loop, acting on the innermost loop.
   `break` cannot carry a value; `continue` in a `while` loop rechecks its condition.
-- `i32` / `bool` expression statements with a semicolon may discard their
+- `i32` / `f64` / `bool` expression statements with a semicolon may discard their
   result; arithmetic checks and call side effects still run. Unit calls may
   omit the semicolon at the end of a block.
-- `print!` / `println!` with a string literal and sequential `{}` placeholders for `i32`
-  and `bool` expressions; a trailing comma is allowed. Empty-argument
+- `print!` / `println!` with a string literal and sequential `{}` placeholders for
+  `i32`, `f64`, and `bool`; fixed precision `{:.0}` through `{:.18}` accepts only
+  `f64`. A trailing comma is allowed. Empty-argument
   `println!()` is not supported; use `println!("")`.
-- The exact qualified calls `idwc::io::read_i32()` and
+- The exact qualified calls `idwc::io::read_i32()`, `idwc::io::read_f64()`, and
   `idwc::io::flush_stdout()`; imports and arbitrary standard-library calls are
   not accepted. Input and function calls may appear in expressions, conditions,
   and output arguments, preserving left-to-right and short-circuit evaluation.
@@ -242,7 +304,7 @@ fn main() {
   `r#type`. C keyword collisions are avoided by assigning each binding a unique
   generated name; functions have separate generated names. Unicode identifier
   normalization is not implemented yet.
-- Captured or numbered placeholders, format specifications, named arguments,
+- Captured or numbered placeholders, other format specifications, named arguments,
   embedded NUL, unsupported types/operators, and non-function
   top-level items are rejected with an error.
 - Comments are allowed; doc comments are attributes and are rejected.
@@ -255,9 +317,10 @@ Unsupported syntax is reported as an error rather than silently ignored.
 
 Value-producing control-flow expressions, `break` with a value, loop labels,
 `if let`, `while let`, and `match` are not supported. Integer-range `for`, arrays,
-indexing, and additional integer types remain planned. Floating-point types are
-not supported yet; `f64` and typed floating-point input are targeted for v0.5.0,
-and line/string input for v0.7.0 as described above.
+indexing, and additional integer types remain planned. `f32`, numeric casts,
+floating remainder, associated constant paths (such as `f64::NAN`), and math
+methods such as `powi` are rejected. Line/string input is targeted for v0.7.0
+as described above.
 Async, unsafe code, raw
 pointers, generics/traits, closures, iterator chains, arbitrary macros, full
 `std`, complex ownership/borrowing, and Cargo dependencies in input programs
@@ -282,6 +345,14 @@ Hex, underscores, suffixes, decimal points, non-ASCII whitespace/digits, and
 partial numeric prefixes are rejected. A valid token immediately followed by
 EOF succeeds; the next read fails. No full line is required.
 
+`idwc::io::read_f64() -> f64` uses the same whitespace, token-length and EOF
+rules. It accepts `[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`,
+plus exactly `NaN`, `inf`, `+inf`, and `-inf`. Other spellings, hex floats,
+underscores, suffixes, and partial parses are rejected. Finite decimal tokens
+that round to infinity, or nonzero tokens that round to zero, are range errors.
+Representable nonzero subnormals and signed zero are accepted. Explicit special
+tokens do not count as range errors. Integer and float reads may alternate.
+
 Failure flushes stdout, writes one diagnostic to stderr, and exits with status
 101. Token length is checked first, then the entire token's syntax, then range;
 no value is returned on failure. Errors are:
@@ -292,6 +363,8 @@ no value is returned on failure. Errors are:
 | Read error (including after token bytes) | `idwc: stdin I/O error` |
 | Invalid complete token | `idwc: invalid integer` |
 | Outside the i32 range | `idwc: integer out of range` |
+| Invalid complete floating-point token | `idwc: invalid float` |
+| Numeric float overflow or underflow to zero | `idwc: float out of range` |
 | More than 128 token bytes | `idwc: input token too long` |
 | Explicit stdout flush failed | `idwc: stdout flush error` |
 
@@ -318,6 +391,35 @@ Out-of-range literals are translation errors. Rust compile-time lints for
 constant overflow or unconditional panics are not replicated; supported
 arithmetic expressions are checked at runtime, including discarded results.
 
+#### Floating-point semantics and formatting
+
+Generated C requires 53-bit binary64 `double`, a compatible bit layout, and
+`FLT_EVAL_METHOD == 0`. Startup sets the C numeric locale and a nontrapping
+nearest-even floating environment, checks subnormal support, and fails with
+`idwc: unsupported floating-point environment` and status 101 if unavailable.
+Fast-math and finite-math-only compilation are rejected. Floating literals use
+exact C hex constants; volatile temporaries round each arithmetic result and
+prevent FMA contraction across operations.
+
+`+`, `-`, `*`, `/`, and unary `-` use IEEE-style binary64 behavior. Nonzero
+division by signed zero produces signed infinity; zero divided by zero produces
+NaN. Overflow produces infinity; underflow is gradual and may produce signed
+zero. These are floating results, not checked-integer failures. NaN compares
+unequal to everything (including itself); ordered comparisons involving NaN are
+false. Signed zeros compare equal. NaN payloads/sign bits are not promised.
+
+Default `{}` prints the shortest decimal coefficient that roundtrips to the
+same binary64 value, in ordinary decimal notation as Rust Display does.
+Decimal midpoint ties in shortest formatting choose the larger magnitude;
+fixed precision `{:.0}`..`{:.18}` instead rounds the exact value with
+round-half-to-even. Special values print `NaN`, `inf`, `-inf` at any precision.
+Signed zero prints `-0` by default and, for example, `-0.00` at precision 2.
+The C formatter expands binary64 into bounded exact decimal digits, searches
+roundtripping candidates for the shortest form, and rounds fixed forms using
+integer digits. It does not delegate Rust Display to `%f` or `%.17g`.
+Parsing and shortest candidate verification require correctly rounded `strtod`
+from the target C library; verified here with macOS Clang/libc.
+
 ### Implementation and verification
 
 ```text
@@ -338,7 +440,10 @@ iteration, so generated arithmetic temporaries and `continue` preserve Rust
 evaluation behavior. `loop` uses a C `for (;;)` without a condition check.
 Function prototypes precede definitions; call arguments are saved into ordered
 temporaries. `src/io.rs` implements the native Rust typed-input/flush interface,
-mirrored by bounded C runtime helpers. `src/main.rs` handles arguments and file I/O. Input programs and custom macros
+mirrored by bounded C runtime helpers. `src/runtime/*.c` contains float
+environment, exact decimal formatting, and shared token-reading helper sources
+embedded only when needed. The generated C remains a single standalone file.
+`src/main.rs` handles arguments and file I/O. Input programs and custom macros
 are never run during translation. The only direct dependency remains `syn`.
 
 ```bash
@@ -353,6 +458,8 @@ short-circuit behavior, branches, nested loops, `break` / `continue`, condition
 re-evaluation, functions/recursion/returns, argument side effects, stdin token
 validation and boundaries, EOF and I/O errors, prompts flushed before input,
 explicit flush failure with a closed output pipe,
+floating-point type errors, arithmetic, special values, rounding midpoints,
+subnormal/large-value formatting, and float token range validation,
 CLI success/error paths,
 and compilation of trusted fixtures with both Rust and C17. Runtime comparisons
 check output bytes and exit status. End-to-end tests require `rustc` and Clang
@@ -363,7 +470,11 @@ compare failure exit status and stdout against Rust with checked arithmetic,
 and check C diagnostics. Rust panic diagnostic text is intentionally not compared.
 Function and input fixtures also run optimized C with UBSan and compare stdout,
 stderr, and exit status against Rust. The interactive prompt test observes the
-prompt before sending stdin. Control-flow and input executables have a
+prompt before sending stdin. Float comparisons include fixed seeded bit patterns
+and neighbors of powers of two, using exact output checks plus finite numerical
+tolerances (`1e-15` absolute + `1e-14` relative). Float fixtures link `-lm`;
+fast-math rejection is tested explicitly. The test runner drains output pipes
+while programs run, including large decimal expansions. Control-flow and input executables have a
 five-second timeout so regressions cannot leave
 the test suite stuck in an infinite loop.
 

@@ -31,7 +31,7 @@ pub(crate) fn parse(mac: &syn::Macro) -> Result<(Vec<PrintPart>, Vec<Expr>), Tra
     Ok((parts, arguments))
 }
 
-/// 還原 {{／}} 與依序的 {}，拒絕其他格式語法並檢查參數數量。
+/// 還原 {{／}}、依序的 {} 與有限浮點精度，並檢查參數數量。
 fn decode(value: &str, argument_count: usize) -> Result<Vec<PrintPart>, TranspileError> {
     if value.contains('\0') {
         return Err(TranspileError::Unsupported("字串不接受內嵌 NUL 字元"));
@@ -46,7 +46,37 @@ fn decode(value: &str, argument_count: usize) -> Result<Vec<PrintPart>, Transpil
                 Some('{') => text.push('{'),
                 Some('}') => {
                     parts.push(PrintPart::Text(std::mem::take(&mut text)));
-                    parts.push(PrintPart::Argument(next_argument));
+                    parts.push(PrintPart::Argument {
+                        index: next_argument,
+                        precision: None,
+                    });
+                    next_argument += 1;
+                }
+                Some(':') if chars.next() == Some('.') => {
+                    let mut digits = String::new();
+                    loop {
+                        match chars.next() {
+                            Some(ch) if ch.is_ascii_digit() => digits.push(ch),
+                            Some('}') => break,
+                            _ => {
+                                return Err(TranspileError::Unsupported(
+                                    "浮點精度格式僅接受 {:.0} 至 {:.18}",
+                                ));
+                            }
+                        }
+                    }
+                    let precision = digits
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|value| *value <= 18)
+                        .ok_or(TranspileError::Unsupported(
+                            "浮點精度格式僅接受 {:.0} 至 {:.18}",
+                        ))?;
+                    parts.push(PrintPart::Text(std::mem::take(&mut text)));
+                    parts.push(PrintPart::Argument {
+                        index: next_argument,
+                        precision: Some(precision),
+                    });
                     next_argument += 1;
                 }
                 _ => {

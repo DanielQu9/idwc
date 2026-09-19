@@ -1,12 +1,8 @@
 fn main() {
-    let mut buf: String = String::new();
-    std::io::stdin().read_line(&mut buf).unwrap();
-    let list: Vec<&str> = buf.split_whitespace().collect();
+    let kg: f64 = idwc::io::read_f64();
+    let cm: f64 = idwc::io::read_f64();
 
-    let kg: f64 = list[0].parse().unwrap();
-    let cm: f64 = list[1].parse().unwrap();
-
-    let bmi: f64 = kg / (cm * 0.01).powi(2);
+    let bmi: f64 = kg / ((cm * 0.01) * (cm * 0.01));
 
     if bmi < 18.5 {
         println!("過瘦");
