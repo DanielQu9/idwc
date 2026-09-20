@@ -1099,7 +1099,7 @@ fn cli_checks_arguments_and_provides_help() {
     let short_help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("-h"));
     assert_eq!(String::from_utf8_lossy(&short_help.stdout), help);
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 1.2.0\n");
+    assert_eq!(version.stdout, b"idwc 1.2.1\n");
     for args in [
         vec![],
         vec!["input.rs", "-o"],
@@ -1268,6 +1268,35 @@ fn stupid_mode_examples_compile() {
         fs::write(&c_source, generated).unwrap();
         compile_c(&c_source, &executable);
     }
+}
+
+#[test]
+fn stupid_mode_string_and_vec_output_compiles_and_runs() {
+    let source = r#"fn main() {
+        let original = "first";
+        let mut alias = original;
+        alias = "second";
+        let mut values = vec![1, 2];
+        values.push(3);
+        values[0] = 4;
+        let replacement = vec![5, 6];
+        values = replacement;
+        println!("{} {:?} {}", alias, values, values.len());
+    }"#;
+    let dir = TestDir::new();
+    let c_source = dir.file("stupid-collections.c");
+    let executable = dir.file("stupid-collections");
+    let generated = idwc::transpile_with_options(
+        source,
+        idwc::TranspileOptions::new(idwc::TranspileMode::Stupid),
+    )
+    .unwrap();
+    fs::write(&c_source, generated).unwrap();
+    compile_c(&c_source, &executable);
+    let output = run_with_timeout(&mut Command::new(&executable));
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"second [5, 6] 2\n");
+    assert!(output.stderr.is_empty());
 }
 
 /// 向前宣告、遞迴、值參數與呼叫副作用在 Rust 和 C 中保持一致。

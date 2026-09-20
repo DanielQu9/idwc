@@ -82,7 +82,7 @@ The exact contract is documented in [Strict semantics](docs/strict-semantics.md)
 
 ## Milestones
 
-The current version is **v1.2.0**.
+The current version is **v1.2.1**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -99,8 +99,14 @@ The current version is **v1.2.0**.
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C | Completed |
 | v1.1.1 | Detailed CLI help and optional `-o` output path | Completed |
 | v1.2.0 | Limited strings, fixed-capacity `Vec`, and collection output | Completed |
+| v1.2.1 | Stupid Mode string and Vec cleanup | Completed |
+| v1.3.0 | Collection ergonomics and additional collection output | Planned |
+| v1.4.0 | Bounded String editing | Planned |
+| v1.5.0 | Eager array and Vec `.map` translation | Planned |
+| v1.6.0 | Short iterator pipelines and reductions | Planned |
+| v1.7.0 | Limited pattern-based control flow | Planned |
 
-v1.2.0 supports string-literal `&str` bindings, bounded owned `String` values,
+The v1.2 line supports string-literal `&str` bindings, bounded owned `String` values,
 `idwc::io::read_line() -> String`, and fixed-capacity `Vec<T>` for the supported
 scalar types. The Vec subset includes `Vec::new()`, both `vec!` forms, `push`,
 indexing, `.len()`, assignment, and local moves. Dedicated `{:?}` output for
@@ -110,6 +116,41 @@ indexing, `.len()`, assignment, and local moves. Dedicated `{:?}` output for
 This does not provide general references, heap allocation, slices, iterators,
 or the complete `String`, `Vec`, and `Debug` APIs. Apparently "just use an
 array" becomes a design document when Rust semantics are invited to the party.
+
+The planned v1.3.0 collection pass will target `&str` fixed arrays,
+Rust-compatible `{:?}` output for `f64` collections, and by-value `for` loops
+over supported fixed arrays and Vecs. This directly covers common parallel-array
+programs such as a `&str` name array paired with an `f64` score array.
+
+v1.4.0 will then add a small, capacity-checked editing API for bounded String,
+starting with `.len()`, `.is_empty()`, `.clear()`, and `.push_str()`.
+
+### Modern Rust lowering roadmap
+
+v1.5.0 is reserved for eager `.map` translation. Fixed arrays will accept the
+real Rust form `values.map(|value| expression)`. Vecs will use a real iterator
+form such as `values.into_iter().map(|value| expression).collect()`, rather than
+an IdwC-only `Vec::map` invention. Both forms lower directly to an indexed C
+`for` loop and a fixed-size or fixed-capacity destination. Strict mode retains
+checked operations inside the closure body; Stupid Mode emits the readable
+operators directly. Initial closures are expression-only and may capture
+already-supported scalar bindings.
+
+v1.6.0 will build short, statically understood pipelines on that machinery.
+The targets are limited `.filter`, `.enumerate`, `.zip`, `.fold`, `.sum`,
+`.any`, and `.all` forms over supported arrays and Vecs. IdwC will fuse a safe
+pipeline into ordinary loops where practical, with early exit for `.any` and
+`.all`; it will not construct a general iterator runtime or heap-allocated
+intermediate collections.
+
+v1.7.0 will target the control-flow sugar needed to make those APIs pleasant:
+small tuple destructuring plus limited `match`, `if let`, and `while let` over
+well-defined scalar and collection results. General patterns, references,
+closures as stored values, and the complete `Iterator` API remain outside this
+roadmap. Rust gets to look modern; C gets a loop and no vote in the matter.
+
+These entries are plans rather than current syntax. The strict semantic
+contract changes only after each feature is implemented and tested.
 
 ## Requirements
 
@@ -163,7 +204,9 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 ```
 
 The command writes a warning to stderr because the result intentionally omits
-strict runtime checks. See the [Stupid Mode contract](docs/stupid-mode.md).
+strict runtime checks. Its v1.2 collection output keeps simple Vec writes
+direct and uses temporaries only where expression side effects require them.
+See the [Stupid Mode contract](docs/stupid-mode.md).
 
 Use `--help` for usage and `--version` or `-V` for the version. Input files
 must end in `.rs`; output files must end in `.c`. The `-o` option is optional:

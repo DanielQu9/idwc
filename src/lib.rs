@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v1.2.0 提供穩定的嚴格模式、可選的可讀 C 模式與 bounded collection
+//! v1.2.1 提供穩定的嚴格模式、可選的可讀 C 模式與 bounded collection
 //! 容量設定；預設入口為 [`transpile`]。
 
 mod codegen;

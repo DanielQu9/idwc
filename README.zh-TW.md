@@ -79,7 +79,7 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 
 ## 里程碑
 
-目前版本為 **v1.2.0**。
+目前版本為 **v1.2.1**。
 
 | 版本 | 目標 | 狀態 |
 | --- | --- | --- |
@@ -96,8 +96,14 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 | v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 已完成 |
 | v1.1.1 | 完整 CLI 說明與可省略的 `-o` 輸出路徑 | 已完成 |
 | v1.2.0 | 限定字串、固定容量 `Vec` 與 collection 輸出 | 已完成 |
+| v1.2.1 | Stupid Mode 的字串與 Vec 輸出整理 | 已完成 |
+| v1.3.0 | Collection 易用性與更多 collection 輸出 | 已規劃 |
+| v1.4.0 | Bounded String 編輯 | 已規劃 |
+| v1.5.0 | Eager 陣列與 Vec `.map` 翻譯 | 已規劃 |
+| v1.6.0 | 短 iterator pipeline 與 reduction | 已規劃 |
+| v1.7.0 | 限定的 pattern-based control flow | 已規劃 |
 
-v1.2.0 支援綁定字串字面量的 `&str`、有容量上限的 owned `String`、
+v1.2 系列支援綁定字串字面量的 `&str`、有容量上限的 owned `String`、
 `idwc::io::read_line() -> String`，以及使用既有純量型別的固定容量 `Vec<T>`。
 Vec 子集包含 `Vec::new()`、兩種 `vec!`、`push`、索引、`.len()`、賦值與
 local move。`i32`、`usize`、`bool` 的 Vec 與固定陣列可用專用 `{:?}` 輸出，
@@ -106,6 +112,35 @@ local move。`i32`、`usize`、`bool` 的 Vec 與固定陣列可用專用 `{:?}`
 這不代表支援一般 Rust reference、heap allocation、slice、iterator，或完整
 `String`、`Vec`、`Debug` API。看來「就用陣列啊」只要碰上 Rust 語意，也能
 膨脹成一份設計文件。
+
+預定的 v1.3.0 collection 補強會以固定 `&str` 陣列、符合 Rust 的 `f64`
+collection `{:?}` 輸出，以及對支援陣列與 Vec 的 by-value `for` 迴圈為目標。
+這會直接涵蓋 `&str` 姓名陣列搭配 `f64` 成績陣列等常見的平行陣列程式。
+
+接著 v1.4.0 會為 bounded String 加入一小組具容量檢查的編輯 API，先從
+`.len()`、`.is_empty()`、`.clear()` 與 `.push_str()` 開始。
+
+### 現代 Rust 語法降低計畫
+
+v1.5.0 保留給 eager `.map` 翻譯。固定陣列會接受真正的 Rust 寫法
+`values.map(|value| expression)`；Vec 則使用
+`values.into_iter().map(|value| expression).collect()` 這類真正的 iterator
+寫法，而不發明只有 IdwC 能理解的 `Vec::map`。兩者都會直接降低成 indexed C
+`for` 迴圈與固定長度或固定容量的目的 collection。嚴格模式會保留 closure
+內容中的檢查式運算，Stupid Mode 則直接生成易讀運算子。第一階段只接受
+expression-only closure，並可捕捉目前已支援的 scalar binding。
+
+v1.6.0 會在這套機制上加入短且能靜態理解的 pipeline，目標包含陣列與 Vec
+的限定 `.filter`、`.enumerate`、`.zip`、`.fold`、`.sum`、`.any` 與 `.all`。
+IdwC 會在可行時把安全的 pipeline 融合成一般迴圈，`.any` 與 `.all` 則使用
+提早退出；不會建立一般 iterator runtime 或 heap intermediate collection。
+
+v1.7.0 會補上讓這些 API 更好用的 control-flow sugar：小型 tuple destructuring，
+以及針對定義明確的 scalar／collection 結果所提供的限定 `match`、`if let` 與
+`while let`。一般 pattern、reference、作為儲存值的 closure 和完整
+`Iterator` API 仍不在這份計畫內。Rust 負責看起來現代，C 負責老實跑迴圈。
+
+這些項目目前只是計畫；每項功能完成並通過測試後，才會加入嚴格語意契約。
 
 ## 環境需求
 
@@ -159,7 +194,8 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 ```
 
 此命令會在 stderr 顯示提示，因為輸出刻意省略嚴格 runtime 檢查。完整規則
-請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
+中，v1.2 collection 的簡單 Vec 寫入會保持直接，只有 expression 副作用需要
+時才建立 temporary。完整規則請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
 
 使用 `--help` 查看用法，使用 `--version` 或 `-V` 查看版本。輸入必須是
 `.rs`，輸出必須是 `.c`。`-o` 可以省略：`idwc path/program.rs` 會寫入

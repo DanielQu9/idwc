@@ -29,6 +29,11 @@ idwc --stupid input.rs -o output.c
   加上 `values_len` 之類的可讀 length 變數，不生成 Vec struct 或 helper。
 - 限定 collection `{:?}` 直接成為寫出方括號與分隔符的一般 C `for` loop；
   共用的語意驗證仍會拒絕 `f64` collection Debug 格式。
+- 可變 `&str` binding 仍使用 `const char *`：Rust binding 的 mutability 允許
+  pointer 重新指向，不代表可以修改字串字面量 bytes。
+- 簡單 Vec `push`、repeat value 與索引賦值直接生成 C 寫入；可重用的混合
+  formatter 引數也保持 inline。若右側有副作用，會先求值至 temporary 再計算
+  index；Vec binding 間的 move 使用一次明確 copy loop。
 
 ## 刻意省略的保證
 

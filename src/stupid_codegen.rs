@@ -176,28 +176,35 @@ impl<'a> Generator<'a> {
                 Statement::VecAssignIndex { id, index, value } => {
                     // Rust evaluates the right-hand side before the place expression.
                     let value_text = self.expression(value);
-                    let value_temp = self.temp_name("assigned_value");
-                    self.line(&format!(
-                        "const {} {value_temp} = {value_text};",
-                        c_type(value.ty)
-                    ));
+                    let value_text = if reusable(value) {
+                        value_text
+                    } else {
+                        let value_temp = self.temp_name("assigned_value");
+                        self.line(&format!(
+                            "const {} {value_temp} = {value_text};",
+                            c_type(value.ty)
+                        ));
+                        value_temp
+                    };
                     let index_text = self.expression(index);
-                    let index_temp = self.temp_name("index");
-                    self.includes.insert("stddef.h");
-                    self.line(&format!("const size_t {index_temp} = {index_text};"));
                     let name = self.binding(*id).to_owned();
-                    self.line(&format!("{name}[{index_temp}] = {value_temp};"));
+                    self.line(&format!("{name}[{index_text}] = {value_text};"));
                 }
                 Statement::VecPush { id, value } => {
                     let value_text = self.expression(value);
-                    let value_temp = self.temp_name("pushed_value");
-                    self.line(&format!(
-                        "const {} {value_temp} = {value_text};",
-                        c_type(value.ty)
-                    ));
+                    let value_text = if reusable(value) {
+                        value_text
+                    } else {
+                        let value_temp = self.temp_name("pushed_value");
+                        self.line(&format!(
+                            "const {} {value_temp} = {value_text};",
+                            c_type(value.ty)
+                        ));
+                        value_temp
+                    };
                     let name = self.binding(*id).to_owned();
                     let length = self.vec_length(*id).to_owned();
-                    self.line(&format!("{name}[{length}++] = {value_temp};"));
+                    self.line(&format!("{name}[{length}++] = {value_text};"));
                 }
                 Statement::Block(statements) => {
                     self.line("{");
@@ -320,8 +327,7 @@ impl<'a> Generator<'a> {
             }
             (Type::Str, ExpressionKind::Variable(_)) => {
                 let value = self.expression(value);
-                let qualifier = if mutable { "" } else { "const " };
-                self.line(&format!("{qualifier}char *{name} = {value};"));
+                self.line(&format!("const char *{name} = {value};"));
             }
             (Type::String, ExpressionKind::StringNew) => {
                 self.line(&format!(
@@ -562,9 +568,21 @@ impl<'a> Generator<'a> {
                 continue;
             }
             let value = self.expression(argument);
+            if reusable(argument) {
+                values.push(value);
+                continue;
+            }
             let temp = self.temp_name("printed_value");
             self.note_type(argument.ty);
-            self.line(&format!("const {} {temp} = {value};", c_type(argument.ty)));
+            let qualifier = if argument.ty == Type::Str {
+                ""
+            } else {
+                "const "
+            };
+            self.line(&format!(
+                "{qualifier}{} {temp} = {value};",
+                c_type(argument.ty)
+            ));
             values.push(temp);
         }
 
@@ -835,6 +853,20 @@ impl<'a> Generator<'a> {
             self.line(&format!("{target_length} = 0;"));
             return;
         }
+        if let ExpressionKind::Variable(source) = &value.kind {
+            let source_name = self.binding(*source).to_owned();
+            let source_length = self.vec_length(*source).to_owned();
+            self.line(&format!("{target_length} = {source_length};"));
+            let index = self.temp_name("copy_index");
+            self.line(&format!(
+                "for (size_t {index} = 0; {index} < {target_length}; ++{index}) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("{target}[{index}] = {source_name}[{index}];"));
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
 
         let temp = self.temp_name("vec_value");
         let temp_length = self.temp_name("vec_value_len");
@@ -868,11 +900,16 @@ impl<'a> Generator<'a> {
             }
             ExpressionKind::VecRepeat(value, repeat_length) => {
                 let value_text = self.expression(value);
-                let repeated = self.temp_name("repeated_value");
-                self.line(&format!(
-                    "const {} {repeated} = {value_text};",
-                    c_type(value.ty)
-                ));
+                let repeated = if reusable(value) {
+                    value_text
+                } else {
+                    let repeated = self.temp_name("repeated_value");
+                    self.line(&format!(
+                        "const {} {repeated} = {value_text};",
+                        c_type(value.ty)
+                    ));
+                    repeated
+                };
                 let index = self.temp_name("repeat_index");
                 self.line(&format!(
                     "for (size_t {index} = 0; {index} < {repeat_length}; ++{index}) {{"
@@ -1129,6 +1166,7 @@ fn reusable(expression: &Expression) -> bool {
             | ExpressionKind::Usize(_)
             | ExpressionKind::Float(_)
             | ExpressionKind::Boolean(_)
+            | ExpressionKind::StringLiteral(_)
             | ExpressionKind::Variable(_)
     )
 }

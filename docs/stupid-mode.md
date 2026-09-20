@@ -34,6 +34,12 @@ Rust-equivalent runtime behavior.
 - Limited collection `{:?}` output becomes an ordinary C `for` loop that writes
   brackets and separators. The shared semantic validator still rejects `f64`
   collection Debug formatting.
+- Mutable `&str` bindings remain `const char *`: Rust binding mutability permits
+  reassignment of the pointer, not mutation of string-literal bytes.
+- Simple Vec `push`, repeat values, and index assignment emit direct C writes.
+  Reusable mixed-format arguments also stay inline. A side-effecting right-hand
+  side is evaluated into a temporary before the index expression; moving one
+  Vec binding into another uses one explicit copy loop.
 
 ## Deliberately omitted guarantees
 

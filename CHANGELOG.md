@@ -6,6 +6,23 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-21
+
+### Changed
+
+- Stupid Mode now emits direct writes for simple Vec `push`, repeat values, and
+  index assignment; reusable mixed-format arguments stay inline, and Vec moves
+  copy in one loop without a full temporary array.
+- Documented the planned collection, bounded String, eager `.map`, short
+  iterator-pipeline, and pattern-based control-flow milestones for the next
+  minor releases.
+
+### Fixed
+
+- Stupid Mode preserves `const char *` for mutable `&str` bindings and avoids
+  invalid duplicate `const` specifiers when string and collection formatting
+  appear in the same output macro.
+
 ## [1.2.0] - 2026-09-21
 
 ### Added

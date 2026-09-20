@@ -81,6 +81,46 @@ fn stupid_mode_generates_readable_c() {
     assert!(!generated.contains("\\345"));
 }
 
+#[test]
+fn stupid_mode_keeps_simple_string_and_vec_operations_direct() {
+    let generated = stupid(
+        r#"fn main() {
+            let base = "first";
+            let mut alias = base;
+            alias = "second";
+            let mut values = vec![1];
+            values.push(2);
+            values[0] = 3;
+            values[index()] = marked();
+            let replacement = vec![4, 5];
+            values = replacement;
+            let repeated = vec![true; 3];
+            let mut positions = vec![0usize];
+            positions.push(positions.len());
+            println!("{} {:?} {:?}", alias, values, repeated);
+        }
+        fn marked() -> i32 { 6 }
+        fn index() -> usize { 0usize }"#,
+    );
+    assert!(generated.contains("const char *alias = base;"));
+    assert!(!generated.contains("\n    char *alias = base;"));
+    assert!(generated.contains("values[values_len++] = 2;"));
+    assert!(generated.contains("values[((size_t)0)] = 3;"));
+    assert!(generated.contains("values_len = replacement_len;"));
+    assert!(!generated.contains("vec_value["));
+    assert!(generated.contains("repeated[repeated_len++] = true;"));
+    assert!(!generated.contains("repeated_value"));
+    assert!(!generated.contains("printed_value"));
+
+    let value = generated.find("= marked();").unwrap();
+    let index = generated.find("values[index()] = assigned_value").unwrap();
+    assert!(
+        value < index,
+        "right-hand side must remain before the index call"
+    );
+    assert!(generated.contains("= positions_len;"));
+}
+
 /// Relaxed generation must not emit IdwC helper functions, structs, or checks.
 #[test]
 fn stupid_mode_omits_runtime_helpers_and_checks() {
