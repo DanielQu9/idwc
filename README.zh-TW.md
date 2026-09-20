@@ -103,25 +103,38 @@ IdwC 不支援完整 Rust。尤其是目前用於行輸入的限定 `String`，�
 - Clang 或 GCC，用於編譯生成的 C17。
 - 在部分平台上，浮點程式需要連結 `-lm`。
 
-## 快速開始
+## 安裝
 
-從 crates.io 安裝已發布的 CLI：
+使用測試過的 dependency lockfile，從 crates.io 安裝已發布的 CLI：
 
 ```bash
-cargo install idwc
+cargo install idwc --locked
 ```
 
-編譯並轉譯 Hello World：
+Cargo 會自動下載、編譯 IdwC，並將 `idwc` 執行檔安裝到 Cargo 的 binary
+目錄，通常是 `~/.cargo/bin`。
+
+若要自行從 Git repository 下載並編譯：
 
 ```bash
-cargo build
-./target/debug/idwc examples/hello.rs -o /tmp/idwc-hello.c
+git clone https://github.com/DanielQu9/idwc.git
+cd idwc
+cargo build --release --locked
+./target/release/idwc --version
+```
+
+## 快速開始
+
+使用已安裝的 CLI 轉譯並編譯 Hello World：
+
+```bash
+idwc examples/hello.rs -o /tmp/idwc-hello.c
 clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 /tmp/idwc-hello
 # Hello, World!
 ```
 
-也可以透過 Cargo 執行相同操作：
+在原始碼 checkout 中，也能不安裝而透過 Cargo 執行相同轉譯：
 
 ```bash
 cargo run -- examples/hello.rs -o /tmp/idwc-hello.c

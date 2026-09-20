@@ -105,25 +105,38 @@ release stabilizes the existing subset rather than expanding toward full Rust.
 - Clang or GCC to compile generated C17.
 - `-lm` on platforms that require it for generated floating-point programs.
 
-## Quick start
+## Installation
 
-Install the released CLI from crates.io:
+Install the released CLI from crates.io with its tested dependency lockfile:
 
 ```bash
-cargo install idwc
+cargo install idwc --locked
 ```
 
-Build and translate Hello World:
+Cargo downloads and compiles IdwC, then installs the `idwc` executable in
+Cargo's binary directory (normally `~/.cargo/bin`).
+
+To build it yourself from the Git repository instead:
 
 ```bash
-cargo build
-./target/debug/idwc examples/hello.rs -o /tmp/idwc-hello.c
+git clone https://github.com/DanielQu9/idwc.git
+cd idwc
+cargo build --release --locked
+./target/release/idwc --version
+```
+
+## Quick start
+
+Translate and compile Hello World with the installed CLI:
+
+```bash
+idwc examples/hello.rs -o /tmp/idwc-hello.c
 clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 /tmp/idwc-hello
 # Hello, World!
 ```
 
-The same command can be run through Cargo:
+From a source checkout, the same translation can be run without installation:
 
 ```bash
 cargo run -- examples/hello.rs -o /tmp/idwc-hello.c
