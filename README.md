@@ -246,7 +246,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 End-to-end tests compile trusted Rust and generated C programs, feed them the
 same input, and compare output bytes and exit status. Checked arithmetic and
 bounds failures are also compiled with UndefinedBehaviorSanitizer. CI runs the
-suite with Clang and GCC on Linux and Clang on macOS.
+suite at the declared Rust 1.88 MSRV with Clang and GCC on Linux and Clang on
+macOS.
 
 ## Planned Stupid Mode
 

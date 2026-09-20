@@ -575,6 +575,16 @@ fn accepts_fixed_arrays_and_usize_indices() {
     }
 }
 
+/// 零長陣列必定越界，直接失敗可避免 GCC 對 unsigned `>= 0` 的警告。
+#[test]
+fn zero_length_array_index_uses_unconditional_failure() {
+    let generated =
+        transpile("fn main() { let values: [i32; 0] = []; println!(\"{}\", values[0usize]); }")
+            .unwrap();
+    assert!(generated.contains("idwc_fail(\"idwc: array index out of bounds\\n\");"));
+    assert!(!generated.contains(">= ((size_t)UINT64_C(0))"));
+}
+
 #[test]
 fn rejects_array_semantic_errors() {
     for (source, diagnostic) in [

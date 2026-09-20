@@ -525,9 +525,13 @@ impl Generator {
         let temp = self.temp_name();
         self.line(&format!("const size_t {temp} = {value};"));
         self.helpers.insert("bounds");
-        self.line(&format!(
-            "if ({temp} >= ((size_t)UINT64_C({length}))) {{ idwc_fail(\"idwc: array index out of bounds\\n\"); }}"
-        ));
+        if length == 0 {
+            self.line("idwc_fail(\"idwc: array index out of bounds\\n\");");
+        } else {
+            self.line(&format!(
+                "if ({temp} >= ((size_t)UINT64_C({length}))) {{ idwc_fail(\"idwc: array index out of bounds\\n\"); }}"
+            ));
+        }
         temp
     }
 

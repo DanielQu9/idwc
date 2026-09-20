@@ -14,3 +14,8 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", features = ["full"] }
+
+[lints.clippy]
+# IdwC examples intentionally use the sequential placeholders accepted by the
+# transpiler; captured Rust format arguments remain outside the strict subset.
+uninlined_format_args = "allow"

@@ -20,6 +20,8 @@ All notable changes to IdwC are documented in this file. The format follows
 - Declared the tested Rust subset and bilingual strict semantic specification
   stable for the 1.x release line.
 - Updated the crate, CLI, documentation, and version tests to 1.0.0.
+- Made zero-length array bounds failures warning-free under strict GCC and
+  documented the intentional Clippy exception for supported format syntax.
 
 ## [0.9.0] - 2026-09-20
 

@@ -237,7 +237,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 端到端測試會分別編譯可信任 Rust 與生成的 C，提供相同輸入，再比較輸出
 bytes 與退出狀態。整數及陣列失敗案例也會使用 UndefinedBehaviorSanitizer。
-CI 會在 Linux 使用 Clang／GCC，並在 macOS 使用 Clang 執行測試。
+CI 會使用宣告的 Rust 1.88 MSRV，在 Linux 使用 Clang／GCC，並在 macOS
+使用 Clang 執行測試。
 
 ## 規劃中的 Stupid Mode
 
