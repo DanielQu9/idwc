@@ -2,7 +2,7 @@
 
 [繁體中文](strict-semantics.zh-TW.md) · [Back to README](../README.md)
 
-This document defines the strict translation contract for IdwC v0.8.0.
+This document defines the strict translation contract for IdwC v0.9.0.
 Anything not listed here is rejected. The generated program aims to preserve
 the behavior of the accepted Rust subset without relying on C undefined
 behavior.
@@ -214,6 +214,22 @@ programs.
 
 Comments are accepted. Doc comments are attributes and are rejected. Every AST
 node is handled by a whitelist; unsupported syntax cannot silently disappear.
+
+## Translation diagnostics
+
+- Library failures use one of three stable `TranspileErrorKind` values:
+  `Parse`, `Unsupported`, or `Semantic`.
+- `TranspileError::message()` returns the diagnostic without its category or
+  position prefix. `TranspileError::location()` returns an optional one-based
+  line and column.
+- AST validation and semantic failures report an associated syntax location
+  when one can be derived from a `syn` span. Whole-program failures without a
+  corresponding AST node, such as a missing `main`, may omit it.
+- `Display` includes the category, optional position, and message. Parse errors
+  preserve the underlying `syn::Error` through `std::error::Error::source()`.
+
+These are translation-time diagnostics. Runtime failure strings and status 101
+are separate contracts described in the input, array, and arithmetic sections.
 
 ## Generated C and verification
 

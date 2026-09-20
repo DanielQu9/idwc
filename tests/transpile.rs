@@ -1,4 +1,4 @@
-use idwc::{TranspileError, transpile};
+use idwc::{TranspileErrorKind, transpile};
 
 /// MVP 的 Hello World 應生成可讀且完整的 C 程式。
 #[test]
@@ -117,7 +117,7 @@ fn main() { println!("hello"); }"#,
     ];
     for source in sources {
         assert!(
-            matches!(transpile(source), Err(TranspileError::Unsupported(_))),
+            transpile(source).is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "應拒絕未支援的原始碼：{source}"
         );
     }
@@ -175,7 +175,7 @@ fn rejects_semantic_errors() {
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
-            matches!(error, TranspileError::Semantic(_)),
+            error.kind() == TranspileErrorKind::Semantic,
             "{source}：{error}"
         );
         assert!(error.to_string().contains(diagnostic), "{source}：{error}");
@@ -230,7 +230,7 @@ fn rejects_features_outside_v0_8() {
         r#"fn main() { let x = 1; println!("{}", x = 2); }"#,
     ] {
         assert!(
-            matches!(transpile(source), Err(TranspileError::Unsupported(_))),
+            transpile(source).is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "應拒絕：{source}"
         );
     }
@@ -310,7 +310,7 @@ fn rejects_control_flow_semantic_errors() {
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
-            matches!(error, TranspileError::Semantic(_)),
+            error.kind() == TranspileErrorKind::Semantic,
             "{source}：{error}"
         );
         assert!(error.to_string().contains(diagnostic), "{source}：{error}");
@@ -353,7 +353,9 @@ fn rejects_unsupported_control_flow_forms() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Unsupported(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "應拒絕：{source}，結果：{result:?}"
         );
     }
@@ -371,10 +373,36 @@ fn reports_parse_errors() {
         "fn main() { if true {} else { #![allow(unused)] } }",
     ] {
         let error = transpile(source).unwrap_err();
-        assert!(matches!(error, TranspileError::Parse(_)));
+        assert_eq!(error.kind(), TranspileErrorKind::Parse);
         assert!(error.to_string().contains("Rust 解析失敗"));
         assert!(std::error::Error::source(&error).is_some());
     }
+}
+
+/// 公開診斷 API 應提供穩定分類、原始訊息與一基準位置。
+#[test]
+fn exposes_structured_diagnostics() {
+    let unsupported = transpile("fn main() {\n    match 1 { _ => {} }\n}").unwrap_err();
+    assert_eq!(unsupported.kind(), TranspileErrorKind::Unsupported);
+    assert_eq!(
+        unsupported.location().map(|location| location.line),
+        Some(2)
+    );
+    assert!(!unsupported.message().is_empty());
+    assert!(unsupported.to_string().contains("第 2 行"));
+
+    let validation = transpile("fn main() {}\nconst VALUE: i32 = 1;").unwrap_err();
+    assert_eq!(validation.kind(), TranspileErrorKind::Unsupported);
+    assert_eq!(validation.location().map(|location| location.line), Some(2));
+
+    let semantic = transpile("fn main() {\n    let value = missing;\n}").unwrap_err();
+    assert_eq!(semantic.kind(), TranspileErrorKind::Semantic);
+    assert_eq!(semantic.location().map(|location| location.line), Some(2));
+
+    let parse = transpile("fn main() {\n    let = ;\n}").unwrap_err();
+    assert_eq!(parse.kind(), TranspileErrorKind::Parse);
+    assert!(parse.location().is_some());
+    assert!(std::error::Error::source(&parse).is_some());
 }
 
 /// 簽章先註冊，函式各自保留 scope 與回傳型別。
@@ -425,7 +453,9 @@ fn rejects_function_semantic_errors() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Semantic(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Semantic),
             "{source}：{result:?}"
         );
     }
@@ -452,7 +482,9 @@ fn rejects_unsupported_function_and_io_forms() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Unsupported(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "{source}：{result:?}"
         );
     }
@@ -494,7 +526,9 @@ fn rejects_floating_point_type_errors() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Semantic(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Semantic),
             "{source}: {result:?}"
         );
     }
@@ -515,7 +549,9 @@ fn rejects_unsupported_floating_point_forms() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Unsupported(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "{source}: {result:?}"
         );
     }
@@ -556,7 +592,7 @@ fn rejects_array_semantic_errors() {
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
-            matches!(error, TranspileError::Semantic(_)),
+            error.kind() == TranspileErrorKind::Semantic,
             "{source}: {error}"
         );
         assert!(error.to_string().contains(diagnostic), "{source}: {error}");
@@ -580,7 +616,9 @@ fn rejects_array_forms_outside_v0_6() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Unsupported(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "{source}: {result:?}"
         );
     }
@@ -621,7 +659,7 @@ fn rejects_line_input_semantic_errors() {
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
-            matches!(error, TranspileError::Semantic(_)),
+            error.kind() == TranspileErrorKind::Semantic,
             "{source}: {error}"
         );
         assert!(error.to_string().contains(diagnostic), "{source}: {error}");
@@ -651,7 +689,9 @@ fn rejects_string_vec_and_math_forms_outside_v0_8() {
     ] {
         let result = transpile(source);
         assert!(
-            matches!(result, Err(TranspileError::Unsupported(_))),
+            result
+                .as_ref()
+                .is_err_and(|error| error.kind() == TranspileErrorKind::Unsupported),
             "{source}: {result:?}"
         );
     }

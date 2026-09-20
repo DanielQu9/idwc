@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp, ext::IdentExt};
+use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp, ext::IdentExt, spanned::Spanned};
 
 use crate::{
-    TranspileError,
+    TranspileError, TranspileErrorKind,
     ir::{
         ArrayElement, BinaryOp, Expression, ExpressionKind, Function, Parameter, ParseSource,
         Program, Statement, Type, UnaryOp,
@@ -41,26 +41,34 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
     for (id, function) in items.iter().enumerate() {
         let name = function.sig.ident.unraw().to_string();
         if !name.is_ascii() {
-            return Err(TranspileError::Unsupported("函式識別字暫僅接受 ASCII"));
+            return Err(TranspileError::unsupported("函式識別字暫僅接受 ASCII")
+                .with_span(function.sig.ident.span()));
         }
         let mut parameters = Vec::new();
         for arg in &function.sig.inputs {
             let syn::FnArg::Typed(parameter) = arg else {
-                return Err(TranspileError::Unsupported("不接受 self 參數"));
+                return Err(TranspileError::unsupported("不接受 self 參數").with_span(arg.span()));
             };
             if !parameter.attrs.is_empty() {
-                return Err(TranspileError::Unsupported("不接受參數屬性"));
+                return Err(
+                    TranspileError::unsupported("不接受參數屬性").with_span(parameter.span())
+                );
             }
-            binding_pattern(&parameter.pat)?;
-            let ty = parse_type(&parameter.ty)?;
-            require_parameter_type(ty)?;
+            binding_pattern(&parameter.pat)
+                .map_err(|error| error.with_span(parameter.pat.span()))?;
+            let ty =
+                parse_type(&parameter.ty).map_err(|error| error.with_span(parameter.ty.span()))?;
+            require_parameter_type(ty).map_err(|error| error.with_span(parameter.ty.span()))?;
             parameters.push(ty);
         }
         let return_type = match &function.sig.output {
             syn::ReturnType::Default => Type::Unit,
-            syn::ReturnType::Type(_, ty) => parse_type(ty)?,
+            syn::ReturnType::Type(_, ty) => {
+                parse_type(ty).map_err(|error| error.with_span(ty.span()))?
+            }
         };
-        require_return_type(return_type)?;
+        require_return_type(return_type)
+            .map_err(|error| error.with_span(function.sig.output.span()))?;
         if functions
             .insert(
                 name.clone(),
@@ -72,11 +80,12 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
             )
             .is_some()
         {
-            return Err(TranspileError::Semantic(format!("重複的函式 `{name}`")));
+            return Err(TranspileError::semantic(format!("重複的函式 `{name}`"))
+                .with_span(function.sig.ident.span()));
         }
     }
     if !functions.contains_key("main") {
-        return Err(TranspileError::Semantic("缺少 fn main()".into()));
+        return Err(TranspileError::semantic("缺少 fn main()"));
     }
     let mut program = Program {
         statements: Vec::new(),
@@ -97,7 +106,8 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
             let syn::FnArg::Typed(parameter) = arg else {
                 unreachable!("參數已驗證");
             };
-            let ident = binding_pattern(&parameter.pat)?;
+            let ident = binding_pattern(&parameter.pat)
+                .map_err(|error| error.with_span(parameter.pat.span()))?;
             let name = ident.ident.unraw().to_string();
             let binding = Binding {
                 id: analyzer.next_id,
@@ -107,7 +117,8 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
             };
             analyzer.next_id += 1;
             if analyzer.scopes[0].insert(name.clone(), binding).is_some() {
-                return Err(TranspileError::Semantic(format!("重複的參數 `{name}`")));
+                return Err(TranspileError::semantic(format!("重複的參數 `{name}`"))
+                    .with_span(parameter.pat.span()));
             }
             parameters.push(Parameter {
                 id: binding.id,
@@ -117,9 +128,10 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
         }
         let statements = analyzer.function_body(&function.block)?;
         if signature.return_type != Type::Unit && !definitely_returns(&statements) {
-            return Err(TranspileError::Semantic(format!(
-                "函式 `{name}` 可能沒有回傳值"
-            )));
+            return Err(
+                TranspileError::semantic(format!("函式 `{name}` 可能沒有回傳值"))
+                    .with_span(function.sig.span()),
+            );
         }
         if name == "main" {
             program.statements = statements;
@@ -153,7 +165,7 @@ impl Analyzer<'_> {
                     match value {
                         Ok(value) => {
                             if self.return_type == Type::Unit && value.ty != Type::Unit {
-                                return Err(TranspileError::Unsupported(
+                                return Err(TranspileError::unsupported(
                                     "unit 函式不能使用有值的尾運算式",
                                 ));
                             }
@@ -165,7 +177,7 @@ impl Analyzer<'_> {
                             }
                             continue;
                         }
-                        Err(TranspileError::Unsupported(_)) => {}
+                        Err(error) if error.kind() == TranspileErrorKind::Unsupported => {}
                         Err(error) => return Err(error),
                     }
                 }
@@ -190,7 +202,7 @@ impl Analyzer<'_> {
 
     /// 敘述採白名單；有值的尾運算式不能作為 main 或敘述區塊的回傳值。
     fn statement(&mut self, statement: &Stmt) -> Result<Statement, TranspileError> {
-        match statement {
+        let result = (|| match statement {
             Stmt::Local(local) if local.attrs.is_empty() => self.local(local),
             Stmt::Macro(mac) if mac.attrs.is_empty() => self.print(&mac.mac),
             Stmt::Expr(Expr::Macro(mac), _) if mac.attrs.is_empty() => self.print(&mac.mac),
@@ -305,10 +317,11 @@ impl Analyzer<'_> {
                 self.evaluate_statement(statement)
             }
             Stmt::Expr(_, _) => self.evaluate_statement(statement),
-            _ => Err(TranspileError::Unsupported(
+            _ => Err(TranspileError::unsupported(
                 "不接受此敘述、item、pattern 或屬性",
             )),
-        }
+        })();
+        result.map_err(|error| error.with_span(statement.span()))
     }
 
     /// 條件只接受 bool 運算式，不使用 C 的整數 truthiness。
@@ -330,7 +343,7 @@ impl Analyzer<'_> {
                 }
                 Expr::If(branch) if branch.attrs.is_empty() => Some(vec![self.branch(branch)?]),
                 _ => {
-                    return Err(TranspileError::Unsupported(
+                    return Err(TranspileError::unsupported(
                         "else 僅接受無屬性的區塊或 else if",
                     ));
                 }
@@ -354,15 +367,15 @@ impl Analyzer<'_> {
     /// 將限定的 i32／usize Range 降低為帶獨立 binding 的迴圈。
     fn for_range(&mut self, for_loop: &syn::ExprForLoop) -> Result<Statement, TranspileError> {
         let Expr::Range(range) = for_loop.expr.as_ref() else {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "for 目前僅支援整數範圍 start..end 或 start..=end",
             ));
         };
         if !range.attrs.is_empty() {
-            return Err(TranspileError::Unsupported("for range 不接受屬性"));
+            return Err(TranspileError::unsupported("for range 不接受屬性"));
         }
         let (Some(start), Some(end)) = (&range.start, &range.end) else {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "for range 必須同時提供起點與終點",
             ));
         };
@@ -376,7 +389,7 @@ impl Analyzer<'_> {
         };
         same_type(start.ty, end.ty)?;
         if !matches!(start.ty, Type::I32 | Type::Usize) {
-            return Err(TranspileError::Unsupported("for range 僅支援 i32 或 usize"));
+            return Err(TranspileError::unsupported("for range 僅支援 i32 或 usize"));
         }
         let ident = binding_pattern(&for_loop.pat)?;
         let name = ident.ident.unraw().to_string();
@@ -415,9 +428,7 @@ impl Analyzer<'_> {
     /// 拒絕迴圈之外的 break／continue，包含不可到達的分支。
     fn check_loop_context(&self) -> Result<(), TranspileError> {
         if self.loop_depth == 0 {
-            return Err(TranspileError::Semantic(
-                "break／continue 僅允許在迴圈內".into(),
-            ));
+            return Err(TranspileError::semantic("break／continue 僅允許在迴圈內"));
         }
         Ok(())
     }
@@ -427,13 +438,13 @@ impl Analyzer<'_> {
         if let Stmt::Expr(expr, Some(_)) = statement {
             let expression = self.expression(expr)?;
             if matches!(expression.ty, Type::String | Type::Tokens) {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "String 與 token collection 僅能用於限定的輸入流程",
                 ));
             }
             return Ok(Statement::Evaluate(expression));
         }
-        Err(TranspileError::Unsupported(
+        Err(TranspileError::unsupported(
             "區塊尾端僅接受 unit 敘述；純值運算式必須帶分號",
         ))
     }
@@ -450,9 +461,9 @@ impl Analyzer<'_> {
         let init = local
             .init
             .as_ref()
-            .ok_or(TranspileError::Unsupported("let 必須在宣告時初始化"))?;
+            .ok_or(TranspileError::unsupported("let 必須在宣告時初始化"))?;
         if init.diverge.is_some() {
-            return Err(TranspileError::Unsupported("不接受 let-else"));
+            return Err(TranspileError::unsupported("不接受 let-else"));
         }
         let value = if let Some(annotation) = annotation {
             self.expression_expected(&init.expr, annotation)?
@@ -467,12 +478,12 @@ impl Analyzer<'_> {
             (Type::String, ExpressionKind::StringNew) => None,
             (Type::Tokens, ExpressionKind::SplitWhitespace(source)) => Some(*source),
             (Type::String, _) => {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "String binding 僅接受 String::new() 初始化",
                 ));
             }
             (Type::Tokens, _) => {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "Vec<&str> binding 僅接受 split_whitespace().collect() 初始化",
                 ));
             }
@@ -524,35 +535,35 @@ impl Analyzer<'_> {
     /// 從內向外查詢識別字；不接受限定路徑或泛型參數。
     fn resolve(&self, expr: &Expr) -> Result<Binding, TranspileError> {
         let Expr::Path(path) = expr else {
-            return Err(TranspileError::Unsupported("變數必須是單一識別字"));
+            return Err(TranspileError::unsupported("變數必須是單一識別字"));
         };
         if !path.attrs.is_empty() || path.qself.is_some() {
-            return Err(TranspileError::Unsupported("不接受路徑屬性或限定路徑"));
+            return Err(TranspileError::unsupported("不接受路徑屬性或限定路徑"));
         }
         let ident = path
             .path
             .get_ident()
-            .ok_or(TranspileError::Unsupported("變數不接受限定路徑或泛型參數"))?;
+            .ok_or(TranspileError::unsupported("變數不接受限定路徑或泛型參數"))?;
         let name = ident.unraw().to_string();
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(&name).copied())
-            .ok_or_else(|| TranspileError::Semantic(format!("找不到變數 `{name}`")))
+            .ok_or_else(|| TranspileError::semantic(format!("找不到變數 `{name}`")))
     }
 
     /// 賦值只能寫入先前宣告的可變 binding。
     fn assignment_target(&self, expr: &Expr) -> Result<Binding, TranspileError> {
         let binding = self.resolve(expr)?;
         if !binding.mutable {
-            return Err(TranspileError::Semantic("不能賦值給不可變 binding".into()));
+            return Err(TranspileError::semantic("不能賦值給不可變 binding"));
         }
         Ok(binding)
     }
 
     /// 遞迴檢查值運算式；所有未列出的 AST 與屬性皆拒絕。
     fn expression(&self, expr: &Expr) -> Result<Expression, TranspileError> {
-        match expr {
+        let result = (|| match expr {
             Expr::Tuple(tuple) if tuple.attrs.is_empty() && tuple.elems.is_empty() => {
                 Ok(Expression {
                     ty: Type::Unit,
@@ -578,7 +589,7 @@ impl Analyzer<'_> {
             Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
                 Lit::Float(float) => {
                     if !matches!(float.suffix(), "" | "f64") {
-                        return Err(TranspileError::Unsupported("浮點字面量僅接受 f64 後綴"));
+                        return Err(TranspileError::unsupported("浮點字面量僅接受 f64 後綴"));
                     }
                     float_expression(float.base10_digits())
                 }
@@ -588,7 +599,7 @@ impl Analyzer<'_> {
                         || spelling.starts_with("0o")
                         || spelling.starts_with("0b")
                     {
-                        return Err(TranspileError::Unsupported("浮點字面量僅接受十進位"));
+                        return Err(TranspileError::unsupported("浮點字面量僅接受十進位"));
                     }
                     float_expression(integer.base10_digits())
                 }
@@ -608,7 +619,7 @@ impl Analyzer<'_> {
                     ty: Type::Bool,
                     kind: ExpressionKind::Boolean(boolean.value),
                 }),
-                _ => Err(TranspileError::Unsupported("值僅接受 i32 與 bool 字面量")),
+                _ => Err(TranspileError::unsupported("值僅接受 i32 與 bool 字面量")),
             },
             Expr::Path(_) => {
                 let binding = self.resolve(expr)?;
@@ -622,7 +633,7 @@ impl Analyzer<'_> {
                 let (op, ty) = match unary.op {
                     UnOp::Neg(_) => (UnaryOp::Negate, Type::I32),
                     UnOp::Not(_) => (UnaryOp::Not, Type::Bool),
-                    _ => return Err(TranspileError::Unsupported("不接受此一元運算")),
+                    _ => return Err(TranspileError::unsupported("不接受此一元運算")),
                 };
                 // Rust 允許 -2147483648（也允許括號），但正的 2147483648 不是 i32。
                 if matches!(op, UnaryOp::Negate)
@@ -660,7 +671,7 @@ impl Analyzer<'_> {
                     BinOp::Ge(_) => BinaryOp::GreaterEqual,
                     BinOp::And(_) => BinaryOp::And,
                     BinOp::Or(_) => BinaryOp::Or,
-                    _ => return Err(TranspileError::Unsupported("不接受此二元運算")),
+                    _ => return Err(TranspileError::unsupported("不接受此二元運算")),
                 };
                 let (left, right) = if is_unsuffixed_integer(&binary.left) {
                     let right = self.expression(&binary.right)?;
@@ -672,8 +683,9 @@ impl Analyzer<'_> {
                 };
                 binary_expression(op, left, right)
             }
-            _ => Err(TranspileError::Unsupported("不接受此值運算式或其屬性")),
-        }
+            _ => Err(TranspileError::unsupported("不接受此值運算式或其屬性")),
+        })();
+        result.map_err(|error| error.with_span(expr.span()))
     }
 
     /// 只在 Rust 會進行整數字面量推導的位置建立 usize；其餘整數仍預設 i32。
@@ -719,12 +731,12 @@ impl Analyzer<'_> {
         expected: Option<Type>,
     ) -> Result<Expression, TranspileError> {
         if array.elems.len() > 4096 {
-            return Err(TranspileError::Unsupported("固定陣列長度上限為 4096"));
+            return Err(TranspileError::unsupported("固定陣列長度上限為 4096"));
         }
         if let Some(expected) = expected
             && array_parts(expected).is_none()
         {
-            return Err(TranspileError::Semantic(format!(
+            return Err(TranspileError::semantic(format!(
                 "型別不符：預期 {expected:?}，實際為陣列"
             )));
         }
@@ -744,7 +756,7 @@ impl Analyzer<'_> {
         if let Some((_, length)) = expected.and_then(array_parts)
             && length != array.elems.len()
         {
-            return Err(TranspileError::Semantic("陣列長度與型別註記不符".into()));
+            return Err(TranspileError::semantic("陣列長度與型別註記不符"));
         }
         let mut values = Vec::new();
         let mut element = expected_element;
@@ -762,7 +774,7 @@ impl Analyzer<'_> {
             }
             values.push(value);
         }
-        let element = element.ok_or(TranspileError::Unsupported("空陣列需要明確的型別註記"))?;
+        let element = element.ok_or(TranspileError::unsupported("空陣列需要明確的型別註記"))?;
         Ok(Expression {
             ty: Type::Array(element, values.len()),
             kind: ExpressionKind::Array(values),
@@ -778,7 +790,7 @@ impl Analyzer<'_> {
         if let Some(expected) = expected
             && array_parts(expected).is_none()
         {
-            return Err(TranspileError::Semantic(format!(
+            return Err(TranspileError::semantic(format!(
                 "型別不符：預期 {expected:?}，實際為陣列"
             )));
         }
@@ -786,7 +798,7 @@ impl Analyzer<'_> {
         if let Some((_, expected_length)) = expected_parts
             && expected_length != length
         {
-            return Err(TranspileError::Semantic("陣列長度與型別註記不符".into()));
+            return Err(TranspileError::semantic("陣列長度與型別註記不符"));
         }
         let value = if let Some((element, _)) = expected_parts {
             self.expression_expected(&repeat.expr, element.ty())?
@@ -807,9 +819,9 @@ impl Analyzer<'_> {
     ) -> Result<(Binding, Expression, ArrayElement), TranspileError> {
         let binding = self.resolve(&index.expr)?;
         let (element, _) =
-            array_parts(binding.ty).ok_or(TranspileError::Semantic("只能索引固定陣列".into()))?;
+            array_parts(binding.ty).ok_or(TranspileError::semantic("只能索引固定陣列"))?;
         if mutable && !binding.mutable {
-            return Err(TranspileError::Semantic("不能修改不可變陣列".into()));
+            return Err(TranspileError::semantic("不能修改不可變陣列"));
         }
         let index = self.expression_expected(&index.index, Type::Usize)?;
         Ok((binding, index, element))
@@ -818,17 +830,17 @@ impl Analyzer<'_> {
     fn method_call(&self, call: &syn::ExprMethodCall) -> Result<Expression, TranspileError> {
         if call.method == "unwrap" {
             if !call.args.is_empty() || call.turbofish.is_some() {
-                return Err(TranspileError::Unsupported("unwrap() 不接受引數或泛型"));
+                return Err(TranspileError::unsupported("unwrap() 不接受引數或泛型"));
             }
             let Expr::MethodCall(inner) = call.receiver.as_ref() else {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "unwrap() 僅支援 read_line 或 parse 的限定模式",
                 ));
             };
             return match inner.method.to_string().as_str() {
                 "read_line" => self.read_line(inner),
                 "parse" => self.parse_value(inner),
-                _ => Err(TranspileError::Unsupported(
+                _ => Err(TranspileError::unsupported(
                     "unwrap() 僅支援 read_line 或 parse 的限定模式",
                 )),
             };
@@ -838,12 +850,12 @@ impl Analyzer<'_> {
         }
         if call.method == "powi" {
             if call.turbofish.is_some() || call.args.len() != 1 {
-                return Err(TranspileError::Unsupported("powi 目前僅支援 powi(2)"));
+                return Err(TranspileError::unsupported("powi 目前僅支援 powi(2)"));
             }
             let exponent = literal_integer(&call.args[0])
-                .ok_or(TranspileError::Unsupported("powi 目前僅支援 powi(2)"))?;
+                .ok_or(TranspileError::unsupported("powi 目前僅支援 powi(2)"))?;
             if integer_value(exponent, false)? != 2 {
-                return Err(TranspileError::Unsupported("powi 目前僅支援 powi(2)"));
+                return Err(TranspileError::unsupported("powi 目前僅支援 powi(2)"));
             }
             let value = self.expression(&call.receiver)?;
             same_type(Type::F64, value.ty)?;
@@ -863,38 +875,38 @@ impl Analyzer<'_> {
                     ty: Type::Usize,
                     kind: ExpressionKind::TokensLength(binding.id),
                 }),
-                _ => Err(TranspileError::Semantic(
-                    "len() 目前僅支援固定陣列或 token collection".into(),
+                _ => Err(TranspileError::semantic(
+                    "len() 目前僅支援固定陣列或 token collection",
                 )),
             };
         }
-        Err(TranspileError::Unsupported(
+        Err(TranspileError::unsupported(
             "不支援此方法調用；目前僅接受限定輸入流程、len() 與 powi(2)",
         ))
     }
 
     fn read_line(&self, call: &syn::ExprMethodCall) -> Result<Expression, TranspileError> {
         if !call.attrs.is_empty() || call.turbofish.is_some() || call.args.len() != 1 {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "read_line 僅接受一個 &mut String 引數",
             ));
         }
         require_stdin_call(&call.receiver)?;
         let Expr::Reference(reference) = &call.args[0] else {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "read_line 引數必須是 &mut String binding",
             ));
         };
         if !reference.attrs.is_empty() || reference.mutability.is_none() {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "read_line 引數必須是 &mut String binding",
             ));
         }
         let binding = self.resolve(&reference.expr)?;
         same_type(Type::String, binding.ty)?;
         if !binding.mutable {
-            return Err(TranspileError::Semantic(
-                "read_line 需要可變的 String binding".into(),
+            return Err(TranspileError::semantic(
+                "read_line 需要可變的 String binding",
             ));
         }
         if self.scopes.iter().any(|scope| {
@@ -902,8 +914,8 @@ impl Analyzer<'_> {
                 .values()
                 .any(|candidate| candidate.source == Some(binding.id))
         }) {
-            return Err(TranspileError::Semantic(
-                "token collection 存活期間不能再次修改來源 String".into(),
+            return Err(TranspileError::semantic(
+                "token collection 存活期間不能再次修改來源 String",
             ));
         }
         Ok(Expression {
@@ -918,7 +930,7 @@ impl Analyzer<'_> {
         inferred: bool,
     ) -> Result<Expression, TranspileError> {
         if !call.attrs.is_empty() || call.method != "collect" || !call.args.is_empty() {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "token collection 僅支援 split_whitespace().collect()",
             ));
         }
@@ -926,13 +938,13 @@ impl Analyzer<'_> {
             Some(arguments) if token_vec_arguments(arguments) => {}
             None if inferred => {}
             _ => {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "collect 必須由 Vec<&str> 註記推導或寫成 collect::<Vec<&str>>()",
                 ));
             }
         }
         let Expr::MethodCall(split) = call.receiver.as_ref() else {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "collect 僅接受 split_whitespace() 的結果",
             ));
         };
@@ -941,7 +953,7 @@ impl Analyzer<'_> {
             || !split.args.is_empty()
             || split.turbofish.is_some()
         {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "collect 僅接受 split_whitespace() 的結果",
             ));
         }
@@ -954,7 +966,7 @@ impl Analyzer<'_> {
 
     fn parse_value(&self, call: &syn::ExprMethodCall) -> Result<Expression, TranspileError> {
         if !call.attrs.is_empty() || call.method != "parse" || !call.args.is_empty() {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "parse 僅支援 parse::<i32>() 或 parse::<f64>()",
             ));
         }
@@ -980,7 +992,7 @@ impl Analyzer<'_> {
                 ParseSource::TrimmedString(binding.id)
             }
             _ => {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::unsupported(
                     "parse 來源僅接受 tokens[index] 或 input.trim()",
                 ));
             }
@@ -994,7 +1006,7 @@ impl Analyzer<'_> {
     /// 檢查內建 I/O 與使用者函式呼叫的路徑、引數數量與型別。
     fn call(&self, call: &syn::ExprCall) -> Result<Expression, TranspileError> {
         let Expr::Path(path) = call.func.as_ref() else {
-            return Err(TranspileError::Unsupported("不接受間接函式呼叫"));
+            return Err(TranspileError::unsupported("不接受間接函式呼叫"));
         };
         if !path.attrs.is_empty()
             || path.qself.is_some()
@@ -1005,7 +1017,7 @@ impl Analyzer<'_> {
                 .iter()
                 .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
         {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::unsupported(
                 "不接受呼叫屬性、限定型別或泛型引數",
             ));
         }
@@ -1017,7 +1029,7 @@ impl Analyzer<'_> {
             .collect();
         if segments == ["String", "new"] {
             if !call.args.is_empty() {
-                return Err(TranspileError::Semantic("String::new() 不接受引數".into()));
+                return Err(TranspileError::semantic("String::new() 不接受引數"));
             }
             return Ok(Expression {
                 ty: Type::String,
@@ -1026,7 +1038,7 @@ impl Analyzer<'_> {
         }
         if segments.len() == 3 && segments[0] == "idwc" && segments[1] == "io" {
             if !call.args.is_empty() {
-                return Err(TranspileError::Semantic("內建 I/O 不接受引數".into()));
+                return Err(TranspileError::semantic("內建 I/O 不接受引數"));
             }
             return match segments[2].as_str() {
                 "read_i32" => Ok(Expression {
@@ -1041,10 +1053,10 @@ impl Analyzer<'_> {
                     ty: Type::Unit,
                     kind: ExpressionKind::FlushStdout,
                 }),
-                _ => Err(TranspileError::Unsupported("不支援此內建 I/O 介面")),
+                _ => Err(TranspileError::unsupported("不支援此內建 I/O 介面")),
             };
         }
-        let ident = path.path.get_ident().ok_or(TranspileError::Unsupported(
+        let ident = path.path.get_ident().ok_or(TranspileError::unsupported(
             "函式呼叫僅接受單一識別字或指定的 I/O 路徑",
         ))?;
         let name = ident.unraw().to_string();
@@ -1054,19 +1066,19 @@ impl Analyzer<'_> {
             .rev()
             .any(|scope| scope.contains_key(&name))
         {
-            return Err(TranspileError::Semantic(format!(
+            return Err(TranspileError::semantic(format!(
                 "`{name}` 被變數遮蔽，不能呼叫"
             )));
         }
         if name == "main" {
-            return Err(TranspileError::Unsupported("不接受呼叫 main"));
+            return Err(TranspileError::unsupported("不接受呼叫 main"));
         }
         let function = self
             .functions
             .get(&name)
-            .ok_or_else(|| TranspileError::Semantic(format!("找不到函式 `{name}`")))?;
+            .ok_or_else(|| TranspileError::semantic(format!("找不到函式 `{name}`")))?;
         if function.parameters.len() != call.args.len() {
-            return Err(TranspileError::Semantic(format!(
+            return Err(TranspileError::semantic(format!(
                 "函式 `{name}` 引數數量不符"
             )));
         }
@@ -1085,12 +1097,12 @@ impl Analyzer<'_> {
 
 fn require_stdin_call(expr: &Expr) -> Result<(), TranspileError> {
     let Expr::Call(call) = expr else {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "read_line receiver 必須是 std::io::stdin()",
         ));
     };
     let Expr::Path(path) = call.func.as_ref() else {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "read_line receiver 必須是 std::io::stdin()",
         ));
     };
@@ -1112,7 +1124,7 @@ fn require_stdin_call(expr: &Expr) -> Result<(), TranspileError> {
             .iter()
             .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
     {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "read_line receiver 必須是 std::io::stdin()",
         ));
     }
@@ -1140,24 +1152,24 @@ fn parse_method_target(
     arguments: Option<&syn::AngleBracketedGenericArguments>,
 ) -> Result<Type, TranspileError> {
     let Some(arguments) = arguments else {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "parse 必須明確寫成 parse::<i32>() 或 parse::<f64>()",
         ));
     };
     let mut args = arguments.args.iter();
     let Some(syn::GenericArgument::Type(ty)) = args.next() else {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "parse 僅支援 i32 或 f64 型別參數",
         ));
     };
     if args.next().is_some() {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "parse 僅支援一個 i32 或 f64 型別參數",
         ));
     }
     let ty = parse_type(ty)?;
     if !matches!(ty, Type::I32 | Type::F64) {
-        return Err(TranspileError::Unsupported("parse 僅支援 i32 或 f64"));
+        return Err(TranspileError::unsupported("parse 僅支援 i32 或 f64"));
     }
     Ok(ty)
 }
@@ -1228,7 +1240,7 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
         let element = scalar_element(parse_type(&array.elem)?)?;
         return Ok(Type::Array(element, array_length(&array.len)?));
     }
-    Err(TranspileError::Unsupported(
+    Err(TranspileError::unsupported(
         "型別僅接受 scalar、一維固定陣列、限定 String／Vec<&str> 與 unit 回傳型別",
     ))
 }
@@ -1236,7 +1248,7 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
 /// 比對型別，避免 C 的隱式整數／布林轉換掩蓋 Rust 錯誤。
 fn same_type(expected: Type, actual: Type) -> Result<(), TranspileError> {
     if expected != actual {
-        return Err(TranspileError::Semantic(format!(
+        return Err(TranspileError::semantic(format!(
             "型別不符：預期 {expected:?}，實際為 {actual:?}"
         )));
     }
@@ -1271,11 +1283,11 @@ fn validate_binary_types(op: BinaryOp, left: Type, right: Type) -> Result<Type, 
         }
         BinaryOp::Remainder => {
             if left == Type::F64 {
-                return Err(TranspileError::Unsupported("尚未支援浮點餘數"));
+                return Err(TranspileError::unsupported("尚未支援浮點餘數"));
             }
             if !matches!(left, Type::I32 | Type::Usize) {
-                return Err(TranspileError::Semantic(
-                    "型別不符：餘數僅接受 i32 或 usize".into(),
+                return Err(TranspileError::semantic(
+                    "型別不符：餘數僅接受 i32 或 usize",
                 ));
             }
             left
@@ -1292,11 +1304,9 @@ fn validate_binary_types(op: BinaryOp, left: Type, right: Type) -> Result<Type, 
 fn float_expression(digits: &str) -> Result<Expression, TranspileError> {
     let value = digits
         .parse::<f64>()
-        .map_err(|_| TranspileError::Semantic("無效的 f64 字面量".into()))?;
+        .map_err(|_| TranspileError::semantic("無效的 f64 字面量"))?;
     if !value.is_finite() {
-        return Err(TranspileError::Semantic(
-            "浮點字面量超出 f64 有限範圍".into(),
-        ));
+        return Err(TranspileError::semantic("浮點字面量超出 f64 有限範圍"));
     }
     Ok(Expression {
         ty: Type::F64,
@@ -1307,8 +1317,8 @@ fn float_expression(digits: &str) -> Result<Expression, TranspileError> {
 /// 算術接受相同型別的整數或浮點數，bool 不做隱式轉換。
 fn require_number(ty: Type) -> Result<(), TranspileError> {
     if !matches!(ty, Type::I32 | Type::Usize | Type::F64) {
-        return Err(TranspileError::Semantic(
-            "型別不符：此運算僅接受 i32、usize 或 f64".into(),
+        return Err(TranspileError::semantic(
+            "型別不符：此運算僅接受 i32、usize 或 f64",
         ));
     }
     Ok(())
@@ -1316,16 +1326,14 @@ fn require_number(ty: Type) -> Result<(), TranspileError> {
 
 fn require_signed_number(ty: Type) -> Result<(), TranspileError> {
     if !matches!(ty, Type::I32 | Type::F64) {
-        return Err(TranspileError::Semantic(
-            "型別不符：負號僅接受 i32 或 f64".into(),
-        ));
+        return Err(TranspileError::semantic("型別不符：負號僅接受 i32 或 f64"));
     }
     Ok(())
 }
 
 fn require_scalar(ty: Type) -> Result<(), TranspileError> {
     if !matches!(ty, Type::I32 | Type::Usize | Type::F64 | Type::Bool) {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "此處僅接受 i32、usize、f64 或 bool",
         ));
     }
@@ -1334,7 +1342,7 @@ fn require_scalar(ty: Type) -> Result<(), TranspileError> {
 
 fn require_assignable(ty: Type) -> Result<(), TranspileError> {
     if matches!(ty, Type::String | Type::Tokens | Type::Unit) {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "String 與 token collection 不支援一般賦值",
         ));
     }
@@ -1342,12 +1350,12 @@ fn require_assignable(ty: Type) -> Result<(), TranspileError> {
 }
 
 fn require_parameter_type(ty: Type) -> Result<(), TranspileError> {
-    require_scalar(ty).map_err(|_| TranspileError::Unsupported("函式參數暫不支援陣列或 unit"))
+    require_scalar(ty).map_err(|_| TranspileError::unsupported("函式參數暫不支援陣列或 unit"))
 }
 
 fn require_return_type(ty: Type) -> Result<(), TranspileError> {
     if matches!(ty, Type::Array(_, _) | Type::String | Type::Tokens) {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "函式回傳值暫不支援陣列、String 或 Vec<&str>",
         ));
     }
@@ -1368,17 +1376,17 @@ fn scalar_element(ty: Type) -> Result<ArrayElement, TranspileError> {
         Type::F64 => Ok(ArrayElement::F64),
         Type::Bool => Ok(ArrayElement::Bool),
         Type::Unit | Type::Array(_, _) | Type::String | Type::Tokens => Err(
-            TranspileError::Unsupported("固定陣列元素僅接受 i32、usize、f64 或 bool"),
+            TranspileError::unsupported("固定陣列元素僅接受 i32、usize、f64 或 bool"),
         ),
     }
 }
 
 fn array_length(expr: &Expr) -> Result<usize, TranspileError> {
     let integer =
-        literal_integer(expr).ok_or(TranspileError::Unsupported("固定陣列長度僅接受整數字面量"))?;
+        literal_integer(expr).ok_or(TranspileError::unsupported("固定陣列長度僅接受整數字面量"))?;
     let length = usize_value(integer)?;
     if length > 4096 {
-        return Err(TranspileError::Unsupported("固定陣列長度上限為 4096"));
+        return Err(TranspileError::unsupported("固定陣列長度上限為 4096"));
     }
     Ok(length)
 }
@@ -1386,7 +1394,7 @@ fn array_length(expr: &Expr) -> Result<usize, TranspileError> {
 /// unit 僅用於函式回傳，不建立 unit 變數、參數或格式引數。
 fn require_value(ty: Type) -> Result<(), TranspileError> {
     if ty == Type::Unit {
-        return Err(TranspileError::Unsupported("此處不接受 unit 值"));
+        return Err(TranspileError::unsupported("此處不接受 unit 值"));
     }
     Ok(())
 }
@@ -1394,14 +1402,14 @@ fn require_value(ty: Type) -> Result<(), TranspileError> {
 /// binding 僅接受無屬性、無借用的 ASCII 識別字。
 fn binding_pattern(pattern: &Pat) -> Result<&syn::PatIdent, TranspileError> {
     let Pat::Ident(ident) = pattern else {
-        return Err(TranspileError::Unsupported("binding 僅接受單一識別字"));
+        return Err(TranspileError::unsupported("binding 僅接受單一識別字"));
     };
     if !ident.attrs.is_empty()
         || ident.by_ref.is_some()
         || ident.subpat.is_some()
         || !ident.ident.unraw().to_string().is_ascii()
     {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "binding 僅接受無屬性、無借用的 ASCII 識別字",
         ));
     }
@@ -1455,25 +1463,25 @@ fn usize_expression(integer: &syn::LitInt) -> Result<Expression, TranspileError>
 
 fn usize_value(integer: &syn::LitInt) -> Result<usize, TranspileError> {
     if !matches!(integer.suffix(), "" | "usize") {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "usize 字面量僅接受無後綴或 usize 後綴",
         ));
     }
     integer
         .base10_parse::<usize>()
-        .map_err(|_| TranspileError::Semantic("整數字面量超出 usize 範圍".into()))
+        .map_err(|_| TranspileError::semantic("整數字面量超出 usize 範圍"))
 }
 
 /// 解析含進位／底線的整數，並在轉成 i32 前檢查範圍與後綴。
 fn integer_value(integer: &syn::LitInt, negative: bool) -> Result<i32, TranspileError> {
     if !matches!(integer.suffix(), "" | "i32") {
-        return Err(TranspileError::Unsupported("整數後綴僅接受 i32"));
+        return Err(TranspileError::unsupported("整數後綴僅接受 i32"));
     }
     let magnitude = integer
         .base10_parse::<i64>()
-        .map_err(|_| TranspileError::Semantic("整數字面量超出 i32 範圍".into()))?;
+        .map_err(|_| TranspileError::semantic("整數字面量超出 i32 範圍"))?;
     let value = if negative { -magnitude } else { magnitude };
-    i32::try_from(value).map_err(|_| TranspileError::Semantic("整數字面量超出 i32 範圍".into()))
+    i32::try_from(value).map_err(|_| TranspileError::semantic("整數字面量超出 i32 範圍"))
 }
 
 #[cfg(test)]

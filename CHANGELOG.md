@@ -6,6 +6,22 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-20
+
+### Added
+
+- Stable `TranspileErrorKind` categories and public message/location accessors.
+- One-based source locations for parse, validation, and semantic diagnostics
+  when an associated syntax node is available.
+
+### Changed
+
+- `TranspileError` is now an opaque diagnostic structure instead of a public
+  enum, finalizing the pre-1.0 library error API without exposing internal
+  payloads.
+- Release verification now covers the public diagnostics, locked package
+  metadata, strict C17 builds, Clang/GCC CI, and bilingual semantic contracts.
+
 ## [0.8.0] - 2026-09-20
 
 ### Added

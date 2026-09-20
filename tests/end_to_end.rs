@@ -911,7 +911,9 @@ fn cli_reports_errors_without_overwriting_output() {
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("不支援的語法"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("不支援的語法"));
+    assert!(stderr.contains("第 1 行"));
     assert_eq!(fs::read_to_string(&output).unwrap(), "existing output");
 
     let missing = dir.file("missing.rs");
@@ -946,7 +948,7 @@ fn cli_checks_arguments_and_provides_help() {
     let help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--help"));
     assert!(String::from_utf8_lossy(&help.stdout).contains("idwc input.rs -o output.c"));
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 0.8.0\n");
+    assert_eq!(version.stdout, b"idwc 0.9.0\n");
     for args in [
         vec![],
         vec!["input.rs"],

@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.8.0 支援 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
+//! v0.9.0 穩定 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
 
 mod codegen;
 mod format;
@@ -10,34 +10,123 @@ mod validate;
 
 use std::fmt;
 
-/// 區分 Rust 解析失敗、未支援語法與語意錯誤。
-#[derive(Debug)]
+/// 轉譯失敗的穩定分類。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum TranspileError {
+pub enum TranspileErrorKind {
     /// 原始碼無法解析成 Rust AST。
-    Parse(syn::Error),
+    Parse,
     /// 語法或字串內容超出目前的支援範圍。
-    Unsupported(&'static str),
-    /// 名稱解析、型別、可變性或整數字面量錯誤。
-    Semantic(String),
+    Unsupported,
+    /// 名稱解析、型別、可變性或字面量不符合子集規則。
+    Semantic,
+}
+
+impl TranspileErrorKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Parse => "Rust 解析失敗",
+            Self::Unsupported => "不支援的語法",
+            Self::Semantic => "語意錯誤",
+        }
+    }
+}
+
+/// 原始碼中的一基準行號與欄號。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SourceLocation {
+    /// 一基準行號。
+    pub line: usize,
+    /// 一基準欄號。
+    pub column: usize,
+}
+
+impl SourceLocation {
+    fn from_span(span: proc_macro2::Span) -> Self {
+        let start = span.start();
+        Self {
+            line: start.line,
+            column: start.column + 1,
+        }
+    }
+}
+
+/// 包含穩定分類、訊息及可用時的原始碼位置。
+#[derive(Debug)]
+pub struct TranspileError {
+    kind: TranspileErrorKind,
+    message: String,
+    location: Option<SourceLocation>,
+    parse_source: Option<syn::Error>,
+}
+
+impl TranspileError {
+    fn parse(error: syn::Error) -> Self {
+        Self {
+            kind: TranspileErrorKind::Parse,
+            message: error.to_string(),
+            location: Some(SourceLocation::from_span(error.span())),
+            parse_source: Some(error),
+        }
+    }
+
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            kind: TranspileErrorKind::Unsupported,
+            message: message.into(),
+            location: None,
+            parse_source: None,
+        }
+    }
+
+    pub(crate) fn semantic(message: impl Into<String>) -> Self {
+        Self {
+            kind: TranspileErrorKind::Semantic,
+            message: message.into(),
+            location: None,
+            parse_source: None,
+        }
+    }
+
+    pub(crate) fn with_span(mut self, span: proc_macro2::Span) -> Self {
+        if self.location.is_none() {
+            self.location = Some(SourceLocation::from_span(span));
+        }
+        self
+    }
+
+    /// 回傳錯誤的穩定分類。
+    pub fn kind(&self) -> TranspileErrorKind {
+        self.kind
+    }
+
+    /// 回傳不含分類與位置前綴的診斷訊息。
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// 回傳可用時的一基準原始碼位置。
+    pub fn location(&self) -> Option<SourceLocation> {
+        self.location
+    }
 }
 
 impl fmt::Display for TranspileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Parse(error) => write!(f, "Rust 解析失敗：{error}"),
-            Self::Unsupported(reason) => write!(f, "不支援的語法：{reason}"),
-            Self::Semantic(reason) => write!(f, "語意錯誤：{reason}"),
+        write!(f, "{}", self.kind.label())?;
+        if let Some(location) = self.location {
+            write!(f, "（第 {} 行，第 {} 欄）", location.line, location.column)?;
         }
+        write!(f, "：{}", self.message)
     }
 }
 
 impl std::error::Error for TranspileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Parse(error) => Some(error),
-            Self::Unsupported(_) | Self::Semantic(_) => None,
-        }
+        self.parse_source
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -46,6 +135,8 @@ impl std::error::Error for TranspileError {
 ///
 /// # Errors
 /// 無效 Rust、未支援 AST／格式、語意錯誤或內嵌 NUL 會回傳錯誤。
+/// [`TranspileError::kind`] 提供穩定分類，[`TranspileError::location`] 在可用時
+/// 提供一基準行號與欄號。
 ///
 /// # Examples
 /// ```
@@ -54,7 +145,7 @@ impl std::error::Error for TranspileError {
 /// # Ok::<(), idwc::TranspileError>(())
 /// ```
 pub fn transpile(source: &str) -> Result<String, TranspileError> {
-    let ast = syn::parse_file(source).map_err(TranspileError::Parse)?;
+    let ast = syn::parse_file(source).map_err(TranspileError::parse)?;
     let program = validate::lower(&ast)?;
     Ok(codegen::generate(&program))
 }

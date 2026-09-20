@@ -2,7 +2,7 @@
 
 [English](strict-semantics.md) · [返回 README](../README.zh-TW.md)
 
-本文定義 IdwC v0.8.0 嚴格模式的翻譯契約。未列出的內容一律拒絕。生成程式
+本文定義 IdwC v0.9.0 嚴格模式的翻譯契約。未列出的內容一律拒絕。生成程式
 應在不依賴 C 未定義行為的前提下，保留所接受 Rust 子集的行為。
 
 ## 程式與函式
@@ -195,6 +195,20 @@ Cargo dependencies。
 
 允許一般 comment；doc comment 屬於 attribute，因此拒絕。每個 AST node 都以
 白名單處理，未支援語法不得默默消失。
+
+## 轉譯診斷
+
+- Library 錯誤使用三種穩定的 `TranspileErrorKind`：`Parse`、`Unsupported`
+  或 `Semantic`。
+- `TranspileError::message()` 回傳不含分類與位置前綴的訊息；
+  `TranspileError::location()` 回傳可選的一基準行號與欄號。
+- AST 驗證及語意錯誤會在能從 `syn` span 取得時回報相關語法位置。若是缺少
+  `main` 等沒有對應 AST node 的整份程式錯誤，位置可以省略。
+- `Display` 包含分類、可選位置與訊息。解析錯誤會透過
+  `std::error::Error::source()` 保留底層 `syn::Error`。
+
+以上是轉譯階段的診斷；輸入、陣列及算術章節中的 runtime 診斷文字與狀態
+101 是另一組契約。
 
 ## 生成 C 與驗證
 

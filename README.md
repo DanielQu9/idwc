@@ -80,7 +80,7 @@ The exact contract is documented in [Strict semantics](docs/strict-semantics.md)
 
 ## Milestones
 
-The current version is **v0.8.0**.
+The current version is **v0.9.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -92,7 +92,7 @@ The current version is **v0.8.0**.
 | v0.6.0 | Fixed arrays, indexing, and bounds checks | Completed |
 | v0.7.0 | Line input, token parsing, and `powi(2)` | Completed |
 | v0.8.0 | Integer range `for` and core-subset completion | Completed |
-| v0.9.0 | API, diagnostics, portability, and release hardening | Planned |
+| v0.9.0 | API, diagnostics, portability, and release hardening | Completed |
 | v1.0.0 | Frozen strict Rust subset and stable documentation | Planned |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C | Planned |
 
@@ -213,6 +213,12 @@ The public entry point is:
 ```rust
 pub fn transpile(source: &str) -> Result<String, TranspileError>;
 ```
+
+Translation failures expose a stable `TranspileErrorKind` (`Parse`,
+`Unsupported`, or `Semantic`), the unprefixed message, and an optional
+one-based `SourceLocation`. `Display` includes the category and location for
+CLI-friendly diagnostics. Errors concerning the whole program, such as a
+missing `main`, may not have a source location.
 
 `src/main.rs` handles only CLI arguments and file I/O. Translation rules stay
 in the library. Runtime C fragments under `src/runtime/` are embedded only when

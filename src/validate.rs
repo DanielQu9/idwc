@@ -1,18 +1,23 @@
-use syn::{Item, ReturnType, Visibility, ext::IdentExt};
+use syn::{Item, ReturnType, Visibility, ext::IdentExt, spanned::Spanned};
 
 use crate::{TranspileError, ir::Program};
 
 /// 白名單驗證整份 AST，僅將已支援的程式降低為 IR。
 pub(crate) fn lower(file: &syn::File) -> Result<Program, TranspileError> {
-    if !file.attrs.is_empty() || file.shebang.is_some() {
-        return Err(TranspileError::Unsupported("不接受檔案屬性或 shebang"));
+    if let Some(attribute) = file.attrs.first() {
+        return Err(
+            TranspileError::unsupported("不接受檔案屬性或 shebang").with_span(attribute.span())
+        );
+    }
+    if file.shebang.is_some() {
+        return Err(TranspileError::unsupported("不接受檔案屬性或 shebang"));
     }
     let mut functions = Vec::new();
     for item in &file.items {
         let Item::Fn(function) = item else {
-            return Err(TranspileError::Unsupported("頂層僅接受函式"));
+            return Err(TranspileError::unsupported("頂層僅接受函式").with_span(item.span()));
         };
-        validate_signature(function)?;
+        validate_signature(function).map_err(|error| error.with_span(function.sig.span()))?;
         functions.push(function);
     }
     crate::semantic::analyze(&functions)
@@ -33,14 +38,14 @@ fn validate_signature(function: &syn::ItemFn) -> Result<(), TranspileError> {
         || signature.generics.where_clause.is_some()
         || signature.variadic.is_some()
     {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "函式必須無屬性、修飾詞、泛型與可變參數，且不可指定可見性",
         ));
     }
     if signature.ident.unraw() == "main"
         && (!signature.inputs.is_empty() || !matches!(signature.output, ReturnType::Default))
     {
-        return Err(TranspileError::Unsupported(
+        return Err(TranspileError::unsupported(
             "main 必須無參數且無顯式回傳型別",
         ));
     }

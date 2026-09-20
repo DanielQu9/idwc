@@ -78,7 +78,7 @@ IdwC 不支援完整 Rust。尤其是目前用於行輸入的限定 `String`，�
 
 ## 里程碑
 
-目前版本為 **v0.8.0**。
+目前版本為 **v0.9.0**。
 
 | 版本 | 目標 | 狀態 |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ IdwC 不支援完整 Rust。尤其是目前用於行輸入的限定 `String`，�
 | v0.6.0 | 固定陣列、索引與邊界檢查 | 已完成 |
 | v0.7.0 | 行輸入、token 解析與 `powi(2)` | 已完成 |
 | v0.8.0 | 整數 range `for` 與核心子集補齊 | 已完成 |
-| v0.9.0 | API、診斷、可攜性與發布強化 | 規劃中 |
+| v0.9.0 | API、診斷、可攜性與發布強化 | 已完成 |
 | v1.0.0 | 凍結嚴格 Rust 子集與穩定文件 | 規劃中 |
 | v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 規劃中 |
 
@@ -207,6 +207,11 @@ Rust source
 ```rust
 pub fn transpile(source: &str) -> Result<String, TranspileError>;
 ```
+
+轉譯失敗會提供穩定的 `TranspileErrorKind` 分類（`Parse`、`Unsupported` 或
+`Semantic`）、不含前綴的原始訊息，以及可選的一基準 `SourceLocation`。
+`Display` 會包含分類與位置，適合直接作為 CLI 診斷。若錯誤屬於整份程式，
+例如缺少 `main`，則可能沒有對應位置。
 
 `src/main.rs` 只處理 CLI 參數與檔案 I/O；翻譯規則保留在 library。
 `src/runtime/` 內的 C 片段只在程式需要時嵌入，最終結果仍是單一 C 檔案。
