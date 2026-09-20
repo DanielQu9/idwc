@@ -116,7 +116,9 @@ impl Generator {
     fn statements(&mut self, statements: &[Statement]) {
         for statement in statements {
             match statement {
-                Statement::Let { id, mutable, value } => {
+                Statement::Let {
+                    id, mutable, value, ..
+                } => {
                     if matches!(value.ty, Type::Array(_, _)) {
                         self.array_let(*id, *mutable, value);
                         continue;
@@ -202,6 +204,7 @@ impl Generator {
                     end,
                     inclusive,
                     body,
+                    ..
                 } => self.for_range(*id, *ty, *mutable, start, end, *inclusive, body),
                 Statement::Loop(body) => {
                     self.line("for (;;) {");

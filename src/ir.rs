@@ -7,6 +7,7 @@ pub(crate) struct Program {
 /// 已驗證的輔助函式；函式名稱以獨立 ID 表示。
 pub(crate) struct Function {
     pub(crate) id: usize,
+    pub(crate) name: String,
     pub(crate) parameters: Vec<Parameter>,
     pub(crate) return_type: Type,
     pub(crate) statements: Vec<Statement>,
@@ -15,6 +16,7 @@ pub(crate) struct Function {
 /// 函式參數的 binding 與值型別。
 pub(crate) struct Parameter {
     pub(crate) id: usize,
+    pub(crate) name: String,
     pub(crate) ty: Type,
     pub(crate) mutable: bool,
 }
@@ -56,6 +58,7 @@ impl ArrayElement {
 pub(crate) enum Statement {
     Let {
         id: usize,
+        name: String,
         mutable: bool,
         value: Expression,
     },
@@ -85,6 +88,7 @@ pub(crate) enum Statement {
     /// 整數範圍上下限只求值一次；每次迭代建立新的 loop binding。
     ForRange {
         id: usize,
+        name: String,
         ty: Type,
         mutable: bool,
         start: Expression,

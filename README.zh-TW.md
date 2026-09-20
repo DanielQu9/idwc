@@ -3,6 +3,7 @@
 **I don't write C.**
 
 [English](README.md) · [嚴格語意規格](docs/strict-semantics.zh-TW.md) ·
+[Stupid Mode](docs/stupid-mode.zh-TW.md) ·
 [版本紀錄](CHANGELOG.md) · [發布流程](RELEASING.md)
 
 *人生苦短，別再手動管理每一根指標。*
@@ -70,15 +71,15 @@ IdwC 不支援完整 Rust。尤其是目前用於行輸入的限定 `String`，�
 取代 `strcat`，光靠一段氣勢十足的 README 開場還不夠。
 
 實際支援的部分仍使用真正的 `syn` AST、白名單驗證、語意分析、typed IR
-與 C codegen。檢查式算術、陣列邊界、輸入錯誤與 binary64 行為都是正式
-保證。不支援的語法會明確拒絕，不會靠猜、不會默默忽略，也不會創造令人
-興奮的全新 C 未定義行為。
+與 C codegen。在預設的嚴格模式中，檢查式算術、陣列邊界、輸入錯誤與
+binary64 行為都是正式保證。不支援的語法會明確拒絕，不會靠猜、不會默默
+忽略，也不會創造令人興奮的全新 C 未定義行為。
 
 完整契約請參考[嚴格語意規格](docs/strict-semantics.zh-TW.md)。
 
 ## 里程碑
 
-目前版本為 **v1.0.0**。
+目前版本為 **v1.1.0**。
 
 | 版本 | 目標 | 狀態 |
 | --- | --- | --- |
@@ -92,10 +93,10 @@ IdwC 不支援完整 Rust。尤其是目前用於行輸入的限定 `String`，�
 | v0.8.0 | 整數 range `for` 與核心子集補齊 | 已完成 |
 | v0.9.0 | API、診斷、可攜性與發布強化 | 已完成 |
 | v1.0.0 | 凍結嚴格 Rust 子集與穩定文件 | 已完成 |
-| v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 規劃中 |
+| v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 已完成 |
 
-更多整數型別和一般 String 操作繼續延後。v1.0.0 穩定現有子集，而不是向
-完整 Rust 擴張。
+更多整數型別和一般 String 操作繼續延後。v1.1.0 新增第二套 codegen 方針，
+但沒有擴張接受的 Rust 語法。
 
 ## 環境需求
 
@@ -139,6 +140,16 @@ clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 ```bash
 cargo run -- examples/hello.rs -o /tmp/idwc-hello.c
 ```
+
+使用 Stupid Mode 產生刻意寬鬆、適合人類閱讀的 C：
+
+```bash
+idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+# 短選項：idwc -s examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+```
+
+此命令會在 stderr 顯示提示，因為輸出刻意省略嚴格 runtime 檢查。完整規則
+請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
 
 使用 `--help` 查看用法，使用 `--version` 或 `-V` 查看版本。輸入必須是
 `.rs`，輸出必須是 `.c`。IdwC 會先完成轉譯與暫存檔寫入，再以原子 rename
@@ -221,11 +232,14 @@ Rust source
     → C17 code generation
 ```
 
-公開入口為：
+預設的公開入口仍使用嚴格模式：
 
 ```rust
 pub fn transpile(source: &str) -> Result<String, TranspileError>;
 ```
+
+Library 使用者可呼叫 `transpile_with_options` 並指定
+`TranspileMode::Stupid`；`transpile(source)` 永遠使用嚴格模式。
 
 轉譯失敗會提供穩定的 `TranspileErrorKind` 分類（`Parse`、`Unsupported` 或
 `Semantic`）、不含前綴的原始訊息，以及可選的一基準 `SourceLocation`。
@@ -253,14 +267,18 @@ bytes 與退出狀態。整數及陣列失敗案例也會使用 UndefinedBehavio
 CI 會使用宣告的 Rust 1.88 MSRV，在 Linux 使用 Clang／GCC，並在 macOS
 使用 Clang 執行測試。
 
-## 規劃中的 Stupid Mode
+## Stupid Mode
 
-嚴格模式已於 v1.0.0 穩定，v1.1.0 將加入 `-s`／`--stupid`。此模式會優先
-產生乾淨、容易修改的 C，並在安全時保留原始名稱；它可以放寬已明確記錄的
-檢查或浮點保證。嚴格模式仍是預設，`transpile(source)` 永遠維持嚴格行為。
+`-s`／`--stupid` 優先產生方便人類閱讀及修改的 C：能保留的原始名稱就
+保留，可見 Unicode 直接出現在 `u8` 字串中，並以直接 C 運算子與標準函式
+取代 IdwC runtime helper。它不產生額外 helper function 或 struct，也不加入
+overflow、陣列邊界、輸入格式檢查或浮點環境初始化；Rust 原始碼本來定義的
+函式仍會正常生成。
 
-Stupid Mode 仍會使用 `syn`、驗證 AST、解析名稱，並拒絕無法產生合法 C 的
-程式，不會退化成字串替換。
+名字可以胡鬧，規格不能含糊。signed overflow、除以零、無效輸入、陣列越界、
+原生浮點格式與 C 求值順序都不在此模式的保證內。Parser、AST 白名單、名稱
+解析與型別檢查仍然保留。嚴格模式維持預設且行為不變；完整取捨請見
+[Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
 
 ## 授權
 

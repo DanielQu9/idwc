@@ -122,6 +122,7 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
             }
             parameters.push(Parameter {
                 id: binding.id,
+                name,
                 ty: binding.ty,
                 mutable: binding.mutable,
             });
@@ -138,6 +139,7 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
         } else {
             program.functions.push(Function {
                 id: signature.id,
+                name,
                 parameters,
                 return_type: signature.return_type,
                 statements,
@@ -405,7 +407,7 @@ impl Analyzer<'_> {
         self.scopes
             .last_mut()
             .expect("for body scope 已建立")
-            .insert(name, binding);
+            .insert(name.clone(), binding);
         let body = for_loop
             .body
             .stmts
@@ -416,6 +418,7 @@ impl Analyzer<'_> {
         self.loop_depth -= 1;
         Ok(Statement::ForRange {
             id: binding.id,
+            name,
             ty: binding.ty,
             mutable: binding.mutable,
             start,
@@ -498,9 +501,11 @@ impl Analyzer<'_> {
         self.next_id += 1;
         // local 僅由 block 呼叫；此時堆疊必定包含目前區塊。
         let scope_index = self.scopes.len() - 1;
-        self.scopes[scope_index].insert(ident.ident.unraw().to_string(), binding);
+        let name = ident.ident.unraw().to_string();
+        self.scopes[scope_index].insert(name.clone(), binding);
         Ok(Statement::Let {
             id: binding.id,
+            name,
             mutable: binding.mutable,
             value,
         })

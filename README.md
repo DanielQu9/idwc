@@ -3,6 +3,7 @@
 **I don't write C.**
 
 [繁體中文](README.zh-TW.md) · [Strict semantics](docs/strict-semantics.md) ·
+[Stupid Mode](docs/stupid-mode.md) ·
 [Changelog](CHANGELOG.md) · [Release process](RELEASING.md)
 
 *Because life's too short to manually manage every pointer.*
@@ -71,16 +72,17 @@ concatenation yet. Apparently replacing `strcat` with an ownership model takes
 more than one dramatic README introduction.
 
 What it does support is handled by a real `syn` AST, whitelist validation,
-semantic analysis, typed IR, and a C code generator. Checked arithmetic,
-bounds-checked arrays, defined input failures, and binary64 behavior are real
-guarantees. Unsupported syntax is rejected instead of being guessed, ignored,
-or converted into exciting new categories of undefined behavior.
+semantic analysis, typed IR, and a C code generator. In the default strict
+mode, checked arithmetic, bounds-checked arrays, defined input failures, and
+binary64 behavior are real guarantees. Unsupported syntax is rejected instead
+of being guessed, ignored, or converted into exciting new categories of
+undefined behavior.
 
 The exact contract is documented in [Strict semantics](docs/strict-semantics.md).
 
 ## Milestones
 
-The current version is **v1.0.0**.
+The current version is **v1.1.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -94,10 +96,11 @@ The current version is **v1.0.0**.
 | v0.8.0 | Integer range `for` and core-subset completion | Completed |
 | v0.9.0 | API, diagnostics, portability, and release hardening | Completed |
 | v1.0.0 | Frozen strict Rust subset and stable documentation | Completed |
-| v1.1.0 | Optional Stupid Mode for relaxed, readable C | Planned |
+| v1.1.0 | Optional Stupid Mode for relaxed, readable C | Completed |
 
-Additional integer types and general String operations are deferred. The v1.0
-release stabilizes the existing subset rather than expanding toward full Rust.
+Additional integer types and general String operations are deferred. v1.1.0
+adds a second code-generation policy without expanding the accepted Rust
+syntax.
 
 ## Requirements
 
@@ -141,6 +144,16 @@ From a source checkout, the same translation can be run without installation:
 ```bash
 cargo run -- examples/hello.rs -o /tmp/idwc-hello.c
 ```
+
+Generate deliberately relaxed, human-readable C with Stupid Mode:
+
+```bash
+idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+# Short form: idwc -s examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+```
+
+The command writes a warning to stderr because the result intentionally omits
+strict runtime checks. See the [Stupid Mode contract](docs/stupid-mode.md).
 
 Use `--help` for usage and `--version` or `-V` for the version. Input files
 must end in `.rs`; output files must end in `.c`. IdwC finishes translation
@@ -226,11 +239,15 @@ Rust source
     → C17 code generation
 ```
 
-The public entry point is:
+The default public entry point remains strict:
 
 ```rust
 pub fn transpile(source: &str) -> Result<String, TranspileError>;
 ```
+
+Call `transpile_with_options` with `TranspileMode::Stupid` to select readable,
+relaxed generation from the library. `transpile(source)` always uses strict
+mode.
 
 Translation failures expose a stable `TranspileErrorKind` (`Parse`,
 `Unsupported`, or `Semantic`), the unprefixed message, and an optional
@@ -262,16 +279,21 @@ bounds failures are also compiled with UndefinedBehaviorSanitizer. CI runs the
 suite at the declared Rust 1.88 MSRV with Clang and GCC on Linux and Clang on
 macOS.
 
-## Planned Stupid Mode
+## Stupid Mode
 
-With strict mode stable in v1.0.0, v1.1.0 will add `-s` / `--stupid`. It will
-prefer clean, editable C and original source names where safe, and may relax
-documented checks or floating-point guarantees. Strict mode will remain the
-default, and `transpile(source)` will always retain strict behavior.
+`-s` / `--stupid` prefers C that a human can read and edit: source names are
+preserved when possible, visible Unicode remains visible in `u8` string
+literals, and direct C operators and standard-library calls replace IdwC
+runtime helpers. It emits no generated helper functions, structs, overflow or
+bounds checks, input validation, or floating-point environment setup. Functions
+written in the Rust source are still emitted normally.
 
-Stupid Mode will still parse with `syn`, validate supported AST, resolve names,
-and reject programs that cannot produce valid C. It will not become string
-replacement.
+The fun name does not make the behavior vague. Signed overflow, division by
+zero, invalid input, out-of-bounds indexing, native floating-point formatting,
+and C evaluation order are explicitly outside this mode's guarantees. Parsing,
+the supported-AST whitelist, name resolution, and type checking still apply.
+Strict mode remains the default and is unchanged. The complete tradeoffs are
+documented in [Stupid Mode](docs/stupid-mode.md).
 
 ## License
 

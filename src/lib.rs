@@ -1,14 +1,44 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v1.0.0 穩定 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
+//! v1.1.0 提供穩定的嚴格模式與可選的可讀 C 模式；預設入口為 [`transpile`]。
 
 mod codegen;
 mod format;
 pub mod io;
 mod ir;
 mod semantic;
+mod stupid_codegen;
 mod validate;
 
 use std::fmt;
+
+/// Selects the C generation contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TranspileMode {
+    /// Preserves the documented Rust-subset semantics and runtime checks.
+    #[default]
+    Strict,
+    /// Prioritizes readable C and source names while omitting strict runtime checks.
+    Stupid,
+}
+
+/// Options for [`transpile_with_options`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranspileOptions {
+    mode: TranspileMode,
+}
+
+impl TranspileOptions {
+    /// Creates options for the selected translation mode.
+    pub const fn new(mode: TranspileMode) -> Self {
+        Self { mode }
+    }
+
+    /// Returns the selected translation mode.
+    pub const fn mode(self) -> TranspileMode {
+        self.mode
+    }
+}
 
 /// 轉譯失敗的穩定分類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +175,35 @@ impl std::error::Error for TranspileError {
 /// # Ok::<(), idwc::TranspileError>(())
 /// ```
 pub fn transpile(source: &str) -> Result<String, TranspileError> {
+    transpile_with_options(source, TranspileOptions::default())
+}
+
+/// Translates the supported Rust subset to C17 using an explicit generation mode.
+/// Parsing, whitelist validation, name resolution, and type checking apply in every mode.
+/// [`TranspileMode::Stupid`] deliberately relaxes runtime semantic guarantees.
+///
+/// # Errors
+/// Returns [`TranspileError`] for invalid Rust, unsupported syntax, or semantic errors.
+///
+/// # Examples
+/// ```
+/// use idwc::{TranspileMode, TranspileOptions, transpile_with_options};
+///
+/// let c = transpile_with_options(
+///     r#"fn main() { let answer = 42; println!("{}", answer); }"#,
+///     TranspileOptions::new(TranspileMode::Stupid),
+/// )?;
+/// assert!(c.contains("const int answer = 42;"));
+/// # Ok::<(), idwc::TranspileError>(())
+/// ```
+pub fn transpile_with_options(
+    source: &str,
+    options: TranspileOptions,
+) -> Result<String, TranspileError> {
     let ast = syn::parse_file(source).map_err(TranspileError::parse)?;
     let program = validate::lower(&ast)?;
-    Ok(codegen::generate(&program))
+    Ok(match options.mode() {
+        TranspileMode::Strict => codegen::generate(&program),
+        TranspileMode::Stupid => stupid_codegen::generate(&program),
+    })
 }

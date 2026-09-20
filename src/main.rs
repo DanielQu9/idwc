@@ -7,7 +7,8 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "用法：idwc input.rs -o output.c\n       idwc --help\n       idwc --version";
+const USAGE: &str =
+    "用法：idwc [-s|--stupid] input.rs -o output.c\n       idwc --help\n       idwc --version";
 
 /// 將 CLI 錯誤寫入 stderr，並回傳非零退出狀態。
 fn main() -> ExitCode {
@@ -22,31 +23,45 @@ fn main() -> ExitCode {
 
 /// 解析最小 CLI、讀取 Rust 並在轉譯成功後寫入 C 檔案。
 fn run() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args_os().skip(1);
-    let input = args.next().ok_or(USAGE)?;
-    if input == "--help" || input == "-h" {
-        if args.next().is_some() {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        if args.len() != 1 {
             return Err(USAGE.into());
         }
         println!("{USAGE}");
         return Ok(());
     }
-    if input == "--version" || input == "-V" {
-        if args.next().is_some() {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        if args.len() != 1 {
             return Err(USAGE.into());
         }
         println!("idwc {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("-o")) {
+
+    let mut stupid = false;
+    let mut positional = Vec::new();
+    for arg in args {
+        if arg == "--stupid" || arg == "-s" {
+            if stupid {
+                return Err(USAGE.into());
+            }
+            stupid = true;
+        } else {
+            positional.push(arg);
+        }
+    }
+    if positional.len() != 3 || positional[1] != "-o" {
         return Err(USAGE.into());
     }
-    let output = args.next().ok_or(USAGE)?;
-    if args.next().is_some() {
-        return Err(USAGE.into());
-    }
-    let input = PathBuf::from(input);
-    let output = PathBuf::from(output);
+    let input = PathBuf::from(&positional[0]);
+    let output = PathBuf::from(&positional[2]);
     if input.extension().is_none_or(|ext| ext != "rs")
         || output.extension().is_none_or(|ext| ext != "c")
     {
@@ -54,7 +69,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let source = fs::read_to_string(&input)
         .map_err(|error| format!("讀取 {} 失敗：{error}", input.display()))?;
-    let generated = idwc::transpile(&source)?;
+    let options = idwc::TranspileOptions::new(if stupid {
+        idwc::TranspileMode::Stupid
+    } else {
+        idwc::TranspileMode::Strict
+    });
+    let generated = idwc::transpile_with_options(&source, options)?;
+    if stupid {
+        eprintln!("idwc: warning: --stupid prioritizes readable C over strict Rust semantics");
+    }
     write_atomic(&output, generated.as_bytes())
         .map_err(|error| format!("寫入 {} 失敗：{error}", output.display()))?;
     Ok(())

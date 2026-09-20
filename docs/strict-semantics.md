@@ -1,11 +1,13 @@
 # IdwC strict semantics
 
-[繁體中文](strict-semantics.zh-TW.md) · [Back to README](../README.md)
+[繁體中文](strict-semantics.zh-TW.md) · [Back to README](../README.md) ·
+[Stupid Mode](stupid-mode.md)
 
-This document defines the strict translation contract for IdwC v1.0.0.
+This document defines the default strict translation contract for IdwC v1.1.0.
 Anything not listed here is rejected. The generated program aims to preserve
 the behavior of the accepted Rust subset without relying on C undefined
-behavior.
+behavior. The optional `-s` / `--stupid` generator has a separate, deliberately
+relaxed [contract](stupid-mode.md) and does not change strict-mode behavior.
 
 ## Program and functions
 

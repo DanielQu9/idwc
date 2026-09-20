@@ -946,9 +946,11 @@ fn cli_reports_errors_without_overwriting_output() {
 #[test]
 fn cli_checks_arguments_and_provides_help() {
     let help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--help"));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("idwc input.rs -o output.c"));
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("idwc [-s|--stupid] input.rs -o output.c")
+    );
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 1.0.0\n");
+    assert_eq!(version.stdout, b"idwc 1.1.0\n");
     for args in [
         vec![],
         vec!["input.rs"],
@@ -959,6 +961,7 @@ fn cli_checks_arguments_and_provides_help() {
         vec!["input.rs", "-o", "output.rs"],
         vec!["--help", "extra"],
         vec!["--version", "extra"],
+        vec!["--stupid", "--stupid", "input.rs", "-o", "output.c"],
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
             .args(&args)
@@ -966,6 +969,79 @@ fn cli_checks_arguments_and_provides_help() {
             .unwrap();
         assert!(!result.status.success(), "應拒絕參數：{args:?}");
         assert!(!result.stderr.is_empty());
+    }
+}
+
+/// CLI Stupid Mode should emit readable standalone C and a visible semantic warning.
+#[test]
+fn stupid_mode_cli_generates_readable_c() {
+    let dir = TestDir::new();
+    let input = dir.file("bmi.rs");
+    let output = dir.file("bmi.c");
+    let executable = dir.file("bmi");
+    fs::write(&input, include_str!("../examples/stupid_stdin.rs")).unwrap();
+
+    let translated = successful(
+        Command::new(env!("CARGO_BIN_EXE_idwc"))
+            .arg("--stupid")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output),
+    );
+    assert!(String::from_utf8_lossy(&translated.stderr).contains("--stupid"));
+    let generated = fs::read_to_string(&output).unwrap();
+    assert!(generated.contains("double kg;"));
+    assert!(generated.contains("puts(u8\"過瘦\");"));
+    assert!(!generated.contains("idwc_fail"));
+    assert!(!generated.contains("struct "));
+
+    compile_c(&output, &executable);
+    let result = run_with_input(&executable, b"70 175\n");
+    assert!(result.status.success());
+    assert_eq!(result.stdout, "標準\n".as_bytes());
+    assert!(result.stderr.is_empty());
+
+    let short_output = dir.file("bmi-short.c");
+    successful(
+        Command::new(env!("CARGO_BIN_EXE_idwc"))
+            .arg("-s")
+            .arg(&input)
+            .arg("-o")
+            .arg(&short_output),
+    );
+    assert_eq!(fs::read(&output).unwrap(), fs::read(short_output).unwrap());
+}
+
+/// Every checked-in Rust example should remain valid C17 under the relaxed generator.
+#[test]
+fn stupid_mode_examples_compile() {
+    let dir = TestDir::new();
+    for (name, source) in [
+        ("hello", include_str!("../examples/hello.rs")),
+        ("variables", include_str!("../examples/variables.rs")),
+        ("control_flow", include_str!("../examples/control_flow.rs")),
+        (
+            "functions_stdin",
+            include_str!("../examples/functions_stdin.rs"),
+        ),
+        (
+            "floating_point",
+            include_str!("../examples/floating_point.rs"),
+        ),
+        ("arrays", include_str!("../examples/arrays.rs")),
+        ("line_input", include_str!("../examples/line_input.rs")),
+        ("ranges", include_str!("../examples/ranges.rs")),
+        ("stupid_stdin", include_str!("../examples/stupid_stdin.rs")),
+    ] {
+        let c_source = dir.file(&format!("{name}.c"));
+        let executable = dir.file(name);
+        let generated = idwc::transpile_with_options(
+            source,
+            idwc::TranspileOptions::new(idwc::TranspileMode::Stupid),
+        )
+        .unwrap();
+        fs::write(&c_source, generated).unwrap();
+        compile_c(&c_source, &executable);
     }
 }
 

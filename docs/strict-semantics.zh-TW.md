@@ -1,9 +1,12 @@
 # IdwC 嚴格語意規格
 
-[English](strict-semantics.md) · [返回 README](../README.zh-TW.md)
+[English](strict-semantics.md) · [返回 README](../README.zh-TW.md) ·
+[Stupid Mode](stupid-mode.zh-TW.md)
 
-本文定義 IdwC v1.0.0 嚴格模式的翻譯契約。未列出的內容一律拒絕。生成程式
-應在不依賴 C 未定義行為的前提下，保留所接受 Rust 子集的行為。
+本文定義 IdwC v1.1.0 預設嚴格模式的翻譯契約。未列出的內容一律拒絕。
+生成程式應在不依賴 C 未定義行為的前提下，保留所接受 Rust 子集的行為。
+可選的 `-s`／`--stupid` 生成器另有刻意放寬的[規格](stupid-mode.zh-TW.md)，
+不會改變嚴格模式行為。
 
 ## 程式與函式
 

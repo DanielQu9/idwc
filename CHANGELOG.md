@@ -6,6 +6,25 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-20
+
+### Added
+
+- Optional `-s` / `--stupid` CLI generation for concise, editable C.
+- `TranspileMode`, `TranspileOptions`, and `transpile_with_options` library API;
+  the existing `transpile` entry point remains strict.
+- Direct UTF-8 `u8` C string literals and predictable preservation of source
+  function, parameter, variable, and range-binding names in Stupid Mode.
+- Bilingual Stupid Mode contracts and C17 compilation coverage for every Rust
+  example.
+
+### Changed
+
+- Stupid Mode uses direct C arithmetic, indexing, floating-point formatting,
+  and standard-library input without generated runtime helpers, structs, or
+  semantic error checks.
+- Updated the crate, CLI, documentation, and version tests to 1.1.0.
+
 ## [1.0.0] - 2026-09-20
 
 ### Added
