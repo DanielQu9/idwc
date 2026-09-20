@@ -894,6 +894,18 @@ fn cli_transpiles_file_to_runnable_c() {
         successful(&mut Command::new(executable)).stdout,
         b"Hello, World!\n"
     );
+
+    let default_input = dir.file("default output.rs");
+    let default_output = dir.file("default output.c");
+    let default_executable = dir.file("default-output");
+    fs::write(&default_input, include_str!("../examples/hello.rs")).unwrap();
+    successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg(&default_input));
+    assert!(default_output.exists());
+    compile_c(&default_output, &default_executable);
+    assert_eq!(
+        successful(&mut Command::new(default_executable)).stdout,
+        b"Hello, World!\n"
+    );
 }
 
 /// 錯誤輸入不應建立或覆寫輸出檔案，且應提供非零退出狀態。
@@ -946,14 +958,17 @@ fn cli_reports_errors_without_overwriting_output() {
 #[test]
 fn cli_checks_arguments_and_provides_help() {
     let help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--help"));
-    assert!(
-        String::from_utf8_lossy(&help.stdout).contains("idwc [-s|--stupid] input.rs -o output.c")
-    );
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("idwc [選項] <input.rs> [-o <output.c>]"));
+    assert!(help.contains("省略時使用輸入檔名並改為 .c"));
+    assert!(help.contains("-s, --stupid"));
+    assert!(help.contains("放棄部分嚴格語意保證"));
+    let short_help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("-h"));
+    assert_eq!(String::from_utf8_lossy(&short_help.stdout), help);
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 1.1.0\n");
+    assert_eq!(version.stdout, b"idwc 1.1.1\n");
     for args in [
         vec![],
-        vec!["input.rs"],
         vec!["input.rs", "-o"],
         vec!["input.rs", "--output", "output.c"],
         vec!["input.rs", "-o", "output.c", "extra"],

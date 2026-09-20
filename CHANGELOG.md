@@ -6,6 +6,21 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-20
+
+### Added
+
+- Detailed `--help` output describing arguments, options, modes, and examples.
+- Optional `-o`: when omitted, the CLI replaces the input `.rs` extension
+  with `.c` for the output path.
+
+### Documentation
+
+- Consolidated limited string values, `vec!`, a fixed-capacity scalar `Vec`
+  subset, and direct-loop collection output into the v1.2.0 plan.
+- Planned `idwc::io::read_line() -> String` as the v1.2.0 convenience API for
+  bounded UTF-8 line input.
+
 ## [1.1.0] - 2026-09-20
 
 ### Added

@@ -79,7 +79,7 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 
 ## 里程碑
 
-目前版本為 **v1.1.0**。
+目前版本為 **v1.1.1**。
 
 | 版本 | 目標 | 狀態 |
 | --- | --- | --- |
@@ -94,9 +94,17 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 | v0.9.0 | API、診斷、可攜性與發布強化 | 已完成 |
 | v1.0.0 | 凍結嚴格 Rust 子集與穩定文件 | 已完成 |
 | v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 已完成 |
+| v1.1.1 | 完整 CLI 說明與可省略的 `-o` 輸出路徑 | 已完成 |
+| v1.2.0 | 限定字串、固定容量 `Vec` 與 collection 輸出 | 規劃中 |
 
-更多整數型別和一般 String 操作繼續延後。v1.1.0 新增第二套 codegen 方針，
-但沒有擴張接受的 Rust 語法。
+v1.2.0 規劃加入綁定字串字面量的 `&str`、有容量上限的 owned `String`
+以及支援既有純量型別的固定容量 `Vec<T>` 子集。Vec 範圍包含 `vec!`、建立、
+`push`、索引、`.len()`、賦值／move，以及 Vec 與固定陣列專用的 `{:?}`
+輸出。此格式會直接降低為 C 迴圈，不會實作 Rust 的一般 `Debug` trait 系統。
+`idwc::io::read_line() -> String` 會提供將一整行 UTF-8 文字讀入 bounded
+String 的簡潔介面。規劃中的轉譯參數會分別以 bytes 設定 String 容量、以
+elements 設定 Vec 容量。這些功能不會宣稱支援一般 Rust reference、heap
+allocation、slice、iterator，或完整的 `String`、`Vec`、`Debug` API。
 
 ## 環境需求
 
@@ -106,7 +114,8 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 
 ## 安裝
 
-使用測試過的 dependency lockfile，從 crates.io 安裝已發布的 CLI：
+crates.io 目前提供 v1.1.0。使用測試過的 dependency lockfile 安裝此 registry
+版本：
 
 ```bash
 cargo install idwc --locked
@@ -114,6 +123,12 @@ cargo install idwc --locked
 
 Cargo 會自動下載、編譯 IdwC，並將 `idwc` 執行檔安裝到 Cargo 的 binary
 目錄，通常是 `~/.cargo/bin`。
+
+v1.1.1 是僅發布於 GitHub 的 patch release，可直接安裝指定 tag：
+
+```bash
+cargo install --git https://github.com/DanielQu9/idwc.git --tag v1.1.1 --locked
+```
 
 若要自行從 Git repository 下載並編譯：
 
@@ -152,8 +167,10 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
 
 使用 `--help` 查看用法，使用 `--version` 或 `-V` 查看版本。輸入必須是
-`.rs`，輸出必須是 `.c`。IdwC 會先完成轉譯與暫存檔寫入，再以原子 rename
-取代輸出，因此轉譯失敗或部分寫入失敗不會截斷既有 C 檔案。
+`.rs`，輸出必須是 `.c`。`-o` 可以省略：`idwc path/program.rs` 會寫入
+`path/program.c`，加上 `-o` 則可指定其他位置。IdwC 會先完成轉譯與暫存檔
+寫入，再以原子 rename 取代輸出，因此轉譯失敗或部分寫入失敗不會截斷既有
+C 檔案。
 
 ### 整數 range 範例
 

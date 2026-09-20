@@ -82,7 +82,7 @@ The exact contract is documented in [Strict semantics](docs/strict-semantics.md)
 
 ## Milestones
 
-The current version is **v1.1.0**.
+The current version is **v1.1.1**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -97,10 +97,20 @@ The current version is **v1.1.0**.
 | v0.9.0 | API, diagnostics, portability, and release hardening | Completed |
 | v1.0.0 | Frozen strict Rust subset and stable documentation | Completed |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C | Completed |
+| v1.1.1 | Detailed CLI help and optional `-o` output path | Completed |
+| v1.2.0 | Limited strings, fixed-capacity `Vec`, and collection output | Planned |
 
-Additional integer types and general String operations are deferred. v1.1.0
-adds a second code-generation policy without expanding the accepted Rust
-syntax.
+v1.2.0 is planned to add string-literal `&str` bindings, bounded owned
+`String` values, and a fixed-capacity `Vec<T>` subset for supported scalar
+types. The Vec subset will include `vec!`, creation, `push`, indexing, `.len()`,
+assignment/move, and dedicated `{:?}` output for Vec and fixed arrays. That
+format is lowered directly to a C loop; it does not implement Rust's general
+`Debug` trait system. `idwc::io::read_line() -> String` will provide a concise
+way to read one UTF-8 line into the bounded String type. Planned
+translation-time options will configure String capacity in bytes and Vec
+capacity in elements. These features will not claim general Rust references,
+heap allocation, slices, iterators, or the complete `String`, `Vec`, and
+`Debug` APIs.
 
 ## Requirements
 
@@ -110,7 +120,8 @@ syntax.
 
 ## Installation
 
-Install the released CLI from crates.io with its tested dependency lockfile:
+crates.io currently carries v1.1.0. Install that registry release with its
+tested dependency lockfile:
 
 ```bash
 cargo install idwc --locked
@@ -118,6 +129,12 @@ cargo install idwc --locked
 
 Cargo downloads and compiles IdwC, then installs the `idwc` executable in
 Cargo's binary directory (normally `~/.cargo/bin`).
+
+v1.1.1 is a GitHub-only patch release. Install that exact tag with:
+
+```bash
+cargo install --git https://github.com/DanielQu9/idwc.git --tag v1.1.1 --locked
+```
 
 To build it yourself from the Git repository instead:
 
@@ -156,9 +173,11 @@ The command writes a warning to stderr because the result intentionally omits
 strict runtime checks. See the [Stupid Mode contract](docs/stupid-mode.md).
 
 Use `--help` for usage and `--version` or `-V` for the version. Input files
-must end in `.rs`; output files must end in `.c`. IdwC finishes translation
-before atomically replacing the output, so a translation or partial-write
-failure does not truncate an existing C file.
+must end in `.rs`; output files must end in `.c`. The `-o` option is optional:
+`idwc path/program.rs` writes `path/program.c`, while `-o` selects another
+location. IdwC finishes translation before atomically replacing the output,
+so a translation or partial-write failure does not truncate an existing C
+file.
 
 ### Integer range example
 
