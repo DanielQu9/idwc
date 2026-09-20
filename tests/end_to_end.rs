@@ -160,14 +160,24 @@ fn assert_same_output(rust: &Output, c: &Output) {
 }
 
 /// 優先使用 Clang，未安裝時改用 GCC；兩者都缺少時明確失敗。
-fn c_compiler() -> &'static str {
+fn c_compiler() -> String {
+    if let Ok(compiler) = std::env::var("IDWC_CC") {
+        if Command::new(&compiler)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return compiler;
+        }
+        panic!("IDWC_CC 指定的 C compiler 無法執行：{compiler}");
+    }
     for compiler in ["clang", "gcc"] {
         if Command::new(compiler)
             .arg("--version")
             .output()
             .is_ok_and(|output| output.status.success())
         {
-            return compiler;
+            return compiler.into();
         }
     }
     panic!("端到端測試需要 Clang 或 GCC");
@@ -654,6 +664,49 @@ fn control_flow_matches_rust_output() {
         }"#,
         r##"fn main() { if true { println!("#![cfg(any())] # [] {{}}"); } }"##,
         r#"fn main() { loop { break } println!("tail break"); }"#,
+        r#"fn main() {
+            println!();
+            let mut sum = 0;
+            for i in -2..3 {
+                if i == 0 { continue; }
+                sum += i;
+            }
+            for mut i in 0..3 {
+                i += 10;
+                sum += i;
+            }
+            for i in 3..3 { sum += i; }
+            for i in 5..2 { sum += i; }
+            println!("{}", sum);
+        }"#,
+        r#"fn main() {
+            for i in 2147483646..=2147483647 {
+                if i == 2147483647 { continue; }
+                println!("{}", i);
+            }
+            let mut total: usize = 0;
+            for i in 0usize..=2usize { total += i; }
+            println!("{}", total);
+        }"#,
+        r#"fn start() -> i32 { println!("start"); 1 }
+        fn end() -> i32 { println!("end"); 4 }
+        fn main() {
+            for i in start()..end() {
+                if i == 2 { continue; }
+                println!("{}", i);
+            }
+        }"#,
+        r#"fn main() {
+            let mut count = 0;
+            for outer in 0..3 {
+                for inner in 0..4 {
+                    if inner == 1 { continue; }
+                    if outer == 2 { break; }
+                    count += 1;
+                }
+            }
+            println!("{}", count);
+        }"#,
     ];
     let dir = TestDir::new();
     let rust_source = dir.file("input.rs");
@@ -688,6 +741,21 @@ fn control_flow_matches_rust_output() {
         assert_eq!(rust_output.stdout, c_output.stdout, "案例：{source}");
         assert_eq!(rust_output.stderr, c_output.stderr, "案例：{source}");
     }
+}
+
+/// Inclusive usize range 在 target 最大值停止，不執行溢位 increment。
+#[test]
+fn integer_range_usize_max_matches_rust() {
+    let source = format!(
+        "fn main() {{ for value in {}usize..={}usize {{ println!(\"{{}}\", value); continue; }} }}",
+        usize::MAX - 1,
+        usize::MAX
+    );
+    let dir = TestDir::new();
+    let (rust, c) = compile_pair(&dir, &source);
+    let rust_output = run_with_timeout(&mut Command::new(rust));
+    let c_output = run_with_timeout(&mut Command::new(c));
+    assert_same_output(&rust_output, &c_output);
 }
 
 /// 檢查算術失敗、求值順序與輸出時機，並用 UBSan 確認 C 沒有 UB。
@@ -813,6 +881,7 @@ fn cli_transpiles_file_to_runnable_c() {
     let output = dir.file("hello world.c");
     let executable = dir.file("hello");
     fs::write(&input, include_str!("../examples/hello.rs")).unwrap();
+    fs::write(&output, "stale output").unwrap();
     let result = successful(
         Command::new(env!("CARGO_BIN_EXE_idwc"))
             .arg(&input)
@@ -876,6 +945,8 @@ fn cli_reports_errors_without_overwriting_output() {
 fn cli_checks_arguments_and_provides_help() {
     let help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--help"));
     assert!(String::from_utf8_lossy(&help.stdout).contains("idwc input.rs -o output.c"));
+    let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
+    assert_eq!(version.stdout, b"idwc 0.8.0\n");
     for args in [
         vec![],
         vec!["input.rs"],
@@ -885,6 +956,7 @@ fn cli_checks_arguments_and_provides_help() {
         vec!["input.txt", "-o", "output.c"],
         vec!["input.rs", "-o", "output.rs"],
         vec!["--help", "extra"],
+        vec!["--version", "extra"],
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
             .args(&args)

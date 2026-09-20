@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.7.0 支援 scalar、固定陣列、限定行輸入、控制流程與函式，入口為 [`transpile`]。
+//! v0.8.0 支援 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
 
 mod codegen;
 mod format;
@@ -12,6 +12,7 @@ use std::fmt;
 
 /// 區分 Rust 解析失敗、未支援語法與語意錯誤。
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TranspileError {
     /// 原始碼無法解析成 Rust AST。
     Parse(syn::Error),
@@ -40,7 +41,7 @@ impl std::error::Error for TranspileError {
     }
 }
 
-/// 將 scalar、固定陣列、控制流程、函式與有限輸入輸出的 Rust 子集轉成 C17 原始碼。
+/// 將 scalar、固定陣列、整數 range、控制流程、函式與有限輸入輸出的 Rust 子集轉成 C17 原始碼。
 /// 不會執行輸入原始碼或展開使用者巨集。
 ///
 /// # Errors

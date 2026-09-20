@@ -82,6 +82,16 @@ pub(crate) enum Statement {
         condition: Expression,
         body: Vec<Statement>,
     },
+    /// 整數範圍上下限只求值一次；每次迭代建立新的 loop binding。
+    ForRange {
+        id: usize,
+        ty: Type,
+        mutable: bool,
+        start: Expression,
+        end: Expression,
+        inclusive: bool,
+        body: Vec<Statement>,
+    },
     Loop(Vec<Statement>),
     /// 無標籤跳躍；只作用於最內層迴圈。
     Break,

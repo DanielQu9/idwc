@@ -3,8 +3,12 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <signal.h>
 
 static void idwc_fail(const char *message) {
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
     fflush(stdout);
     fputs(message, stderr);
     exit(101);

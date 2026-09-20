@@ -294,8 +294,10 @@ double idwc_f1(const double idwc_v0, const double idwc_v1) {
     (void)idwc_v0;
     (void)idwc_v1;
     const volatile double idwc_t0 = (idwc_v1 * idwc_v1);
-    const volatile double idwc_t1 = idwc_fdiv(idwc_v0, idwc_t0);
-    return idwc_t1;
+    const volatile double idwc_t1 = idwc_t0;
+    const volatile double idwc_t2 = idwc_fdiv(idwc_v0, idwc_t1);
+    const volatile double idwc_t3 = idwc_t2;
+    return idwc_t3;
 }
 
 int main(void) {
@@ -303,24 +305,24 @@ int main(void) {
     fputs("Enter weight (kg) and height (m): ", stdout);
     idwc_flush_stdout();
     (void)(0);
-    const volatile double idwc_t2 = idwc_read_f64();
-    const double idwc_v0 = idwc_t2;
+    const volatile double idwc_t4 = idwc_read_f64();
+    const double idwc_v0 = idwc_t4;
     (void)idwc_v0;
-    const volatile double idwc_t3 = idwc_read_f64();
-    const double idwc_v1 = idwc_t3;
+    const volatile double idwc_t5 = idwc_read_f64();
+    const double idwc_v1 = idwc_t5;
     (void)idwc_v1;
-    const double idwc_t4 = idwc_v0;
-    const double idwc_t5 = idwc_v1;
-    const volatile double idwc_t6 = idwc_f1(idwc_t4, idwc_t5);
-    const double idwc_v2 = idwc_t6;
+    const double idwc_t6 = idwc_v0;
+    const double idwc_t7 = idwc_v1;
+    const volatile double idwc_t8 = idwc_f1(idwc_t6, idwc_t7);
+    const double idwc_v2 = idwc_t8;
     (void)idwc_v2;
-    const double idwc_t7 = idwc_v2;
-    const bool idwc_t8 = (idwc_v2 < 0x19000000000000p-48);
-    const bool idwc_t9 = idwc_t8;
+    const double idwc_t9 = idwc_v2;
+    const bool idwc_t10 = (idwc_v2 < 0x19000000000000p-48);
+    const bool idwc_t11 = idwc_t10;
     fputs("BMI = ", stdout);
-    idwc_print_f64(idwc_t7, 2);
+    idwc_print_f64(idwc_t9, 2);
     fputs(", below 25 = ", stdout);
-    fputs(idwc_t9 ? "true" : "false", stdout);
+    fputs(idwc_t11 ? "true" : "false", stdout);
     putchar('\n');
     return 0;
 }

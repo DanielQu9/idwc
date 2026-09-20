@@ -207,6 +207,11 @@ impl Analyzer<'_> {
                 let body = self.loop_body(&while_loop.body)?;
                 Ok(Statement::While { condition, body })
             }
+            Stmt::Expr(Expr::ForLoop(for_loop), _)
+                if for_loop.attrs.is_empty() && for_loop.label.is_none() =>
+            {
+                self.for_range(for_loop)
+            }
             Stmt::Expr(Expr::Loop(loop_expr), _)
                 if loop_expr.attrs.is_empty() && loop_expr.label.is_none() =>
             {
@@ -344,6 +349,67 @@ impl Analyzer<'_> {
         let result = self.block(block);
         self.loop_depth -= 1;
         result
+    }
+
+    /// 將限定的 i32／usize Range 降低為帶獨立 binding 的迴圈。
+    fn for_range(&mut self, for_loop: &syn::ExprForLoop) -> Result<Statement, TranspileError> {
+        let Expr::Range(range) = for_loop.expr.as_ref() else {
+            return Err(TranspileError::Unsupported(
+                "for 目前僅支援整數範圍 start..end 或 start..=end",
+            ));
+        };
+        if !range.attrs.is_empty() {
+            return Err(TranspileError::Unsupported("for range 不接受屬性"));
+        }
+        let (Some(start), Some(end)) = (&range.start, &range.end) else {
+            return Err(TranspileError::Unsupported(
+                "for range 必須同時提供起點與終點",
+            ));
+        };
+        let (start, end) = if is_unsuffixed_integer(start) {
+            let end = self.expression(end)?;
+            (self.expression_expected(start, end.ty)?, end)
+        } else {
+            let start = self.expression(start)?;
+            let end = self.expression_expected(end, start.ty)?;
+            (start, end)
+        };
+        same_type(start.ty, end.ty)?;
+        if !matches!(start.ty, Type::I32 | Type::Usize) {
+            return Err(TranspileError::Unsupported("for range 僅支援 i32 或 usize"));
+        }
+        let ident = binding_pattern(&for_loop.pat)?;
+        let name = ident.ident.unraw().to_string();
+        let binding = Binding {
+            id: self.next_id,
+            ty: start.ty,
+            mutable: ident.mutability.is_some(),
+            source: None,
+        };
+        self.next_id += 1;
+        self.loop_depth += 1;
+        self.scopes.push(HashMap::new());
+        self.scopes
+            .last_mut()
+            .expect("for body scope 已建立")
+            .insert(name, binding);
+        let body = for_loop
+            .body
+            .stmts
+            .iter()
+            .map(|statement| self.statement(statement))
+            .collect::<Result<Vec<_>, _>>();
+        self.scopes.pop();
+        self.loop_depth -= 1;
+        Ok(Statement::ForRange {
+            id: binding.id,
+            ty: binding.ty,
+            mutable: binding.mutable,
+            start,
+            end,
+            inclusive: matches!(range.limits, syn::RangeLimits::Closed(_)),
+            body: body?,
+        })
     }
 
     /// 拒絕迴圈之外的 break／continue，包含不可到達的分支。

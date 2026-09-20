@@ -194,6 +194,15 @@ impl Generator {
                     self.indent -= 1;
                     self.line("}");
                 }
+                Statement::ForRange {
+                    id,
+                    ty,
+                    mutable,
+                    start,
+                    end,
+                    inclusive,
+                    body,
+                } => self.for_range(*id, *ty, *mutable, start, end, *inclusive, body),
                 Statement::Loop(body) => {
                     self.line("for (;;) {");
                     self.indent += 1;
@@ -228,6 +237,61 @@ impl Generator {
                 }
             }
         }
+    }
+
+    /// Range bounds 依 Rust 順序求值一次，iterator counter 與 body binding 分離。
+    #[allow(clippy::too_many_arguments)]
+    fn for_range(
+        &mut self,
+        id: usize,
+        ty: Type,
+        mutable: bool,
+        start: &Expression,
+        end: &Expression,
+        inclusive: bool,
+        body: &[Statement],
+    ) {
+        self.line("{");
+        self.indent += 1;
+        let start = self.snapshot(start);
+        let end = self.snapshot(end);
+        let iterator = self.temp_name();
+        let update = match ty {
+            Type::I32 => {
+                self.helpers.insert("add");
+                format!("idwc_add({iterator}, INT32_C(1))")
+            }
+            Type::Usize => {
+                self.helpers.insert("uadd");
+                format!("idwc_uadd({iterator}, (size_t)UINT64_C(1))")
+            }
+            _ => unreachable!("for range 型別已限制為 i32 或 usize"),
+        };
+        if inclusive {
+            let active = self.temp_name();
+            self.line(&format!("bool {active} = {start} <= {end};"));
+            self.line(&format!(
+                "for ({} {iterator} = {start}; {active}; {active} = {iterator} != {end}, {iterator} = {active} ? {update} : {iterator}) {{",
+                c_type(ty)
+            ));
+        } else {
+            self.line(&format!(
+                "for ({} {iterator} = {start}; {iterator} < {end}; {iterator} = {update}) {{",
+                c_type(ty)
+            ));
+        }
+        self.indent += 1;
+        let qualifier = if mutable { "" } else { "const " };
+        self.line(&format!(
+            "{qualifier}{} idwc_v{id} = {iterator};",
+            c_type(ty)
+        ));
+        self.line(&format!("(void)idwc_v{id};"));
+        self.statements(body);
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// 輸出前先依序求值所有參數，避免參數失敗時先寫出部分文字。

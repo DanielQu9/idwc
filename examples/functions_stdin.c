@@ -21,6 +21,40 @@ static int32_t idwc_checked(int64_t value) {
     return (int32_t)value;
 }
 
+/* ASCII whitespace is independent of the host locale. */
+static bool idwc_space(int byte) {
+    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r'
+        || byte == '\v' || byte == '\f';
+}
+
+/* Caller supplies 129 bytes: 128 token bytes plus a terminating NUL. */
+static size_t idwc_read_token(unsigned char token[129]) {
+    size_t length = 0;
+    int byte;
+    do {
+        byte = fgetc(stdin);
+        if (byte == EOF) {
+            idwc_fail(ferror(stdin) ? "idwc: stdin I/O error\n" : "idwc: unexpected EOF\n");
+        }
+    } while (idwc_space(byte));
+    for (;;) {
+        if (length == 128) {
+            idwc_fail("idwc: input token too long\n");
+        }
+        token[length++] = (unsigned char)byte;
+        byte = fgetc(stdin);
+        if (byte == EOF) {
+            if (ferror(stdin)) {
+                idwc_fail("idwc: stdin I/O error\n");
+            }
+            break;
+        }
+        if (idwc_space(byte)) { break; }
+    }
+    token[length] = '\0';
+    return length;
+}
+
 static int32_t idwc_add(int32_t a, int32_t b) {
     return idwc_checked((int64_t)a + (int64_t)b);
 }
@@ -34,37 +68,9 @@ static void idwc_flush_stdout(void) {
     }
 }
 
-static bool idwc_space(int byte) {
-    return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r'
-        || byte == '\v' || byte == '\f';
-}
-
 static int32_t idwc_read_i32(void) {
-    unsigned char token[128];
-    size_t length = 0;
-    int byte;
-    do {
-        byte = fgetc(stdin);
-        if (byte == EOF) {
-            idwc_fail(ferror(stdin) ? "idwc: stdin I/O error\n" : "idwc: unexpected EOF\n");
-        }
-    } while (idwc_space(byte));
-    for (;;) {
-        if (length == sizeof token) {
-            idwc_fail("idwc: input token too long\n");
-        }
-        token[length++] = (unsigned char)byte;
-        byte = fgetc(stdin);
-        if (byte == EOF) {
-            if (ferror(stdin)) {
-                idwc_fail("idwc: stdin I/O error\n");
-            }
-            break;
-        }
-        if (idwc_space(byte)) {
-            break;
-        }
-    }
+    unsigned char token[129];
+    size_t length = idwc_read_token(token);
     bool negative = token[0] == '-';
     size_t start = (negative || token[0] == '+') ? 1 : 0;
     if (start == length) {

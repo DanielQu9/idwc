@@ -10,9 +10,55 @@ fn hello_world_generates_expected_c() {
     );
 }
 
+/// 版本庫內的 C 範例必須與目前轉譯器輸出完全一致。
+#[test]
+fn checked_in_c_examples_match_generated_output() {
+    for (rust, c) in [
+        (
+            include_str!("../examples/hello.rs"),
+            include_str!("../examples/hello.c"),
+        ),
+        (
+            include_str!("../examples/variables.rs"),
+            include_str!("../examples/variables.c"),
+        ),
+        (
+            include_str!("../examples/control_flow.rs"),
+            include_str!("../examples/control_flow.c"),
+        ),
+        (
+            include_str!("../examples/functions_stdin.rs"),
+            include_str!("../examples/functions_stdin.c"),
+        ),
+        (
+            include_str!("../examples/floating_point.rs"),
+            include_str!("../examples/floating_point.c"),
+        ),
+        (
+            include_str!("../examples/arrays.rs"),
+            include_str!("../examples/arrays.c"),
+        ),
+        (
+            include_str!("../examples/line_input.rs"),
+            include_str!("../examples/line_input.c"),
+        ),
+        (
+            include_str!("../examples/ranges.rs"),
+            include_str!("../examples/ranges.c"),
+        ),
+    ] {
+        assert_eq!(transpile(rust).unwrap(), c);
+    }
+}
+
 /// 已支援的 println! 形式應保持一致輸出。
 #[test]
 fn accepts_supported_macro_forms() {
+    assert!(
+        transpile("fn main() { println!(); print!(); }")
+            .unwrap()
+            .contains("puts(\"\");")
+    );
     for source in [
         r#"fn main() { println!("hello"); }"#,
         r#"fn main() { println!("hello") }"#,
@@ -55,7 +101,6 @@ fn main() { println!("hello"); }"#,
         r#"fn main() { std::println!("hello"); }"#,
         r#"fn main() { ::println!("hello"); }"#,
         r#"macro_rules! println { () => {} } fn main() { println!("hello"); }"#,
-        "fn main() { println!(); }",
         "fn main() { println!(123); }",
         r#"fn main() { println!(b"hello"); }"#,
         r#"fn main() { println!(concat!("hello")); }"#,
@@ -137,9 +182,9 @@ fn rejects_semantic_errors() {
     }
 }
 
-/// v0.7.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+/// v0.8.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_7() {
+fn rejects_features_outside_v0_8() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -205,6 +250,10 @@ fn accepts_control_flow_statements() {
         "fn main() { loop { continue } }",
         "fn main() { while true { if false { break; } else { continue; } } }",
         "fn main() { loop { { loop { break; } } continue; } }",
+        "fn main() { for i in 0..3 { println!(\"{}\", i); } }",
+        "fn main() { for i in -2..=2 { println!(\"{}\", i); } }",
+        "fn main() { for i in 0usize..3usize { println!(\"{}\", i); } }",
+        "fn main() { for mut i in 0..3 { i += 10; println!(\"{}\", i); } }",
         include_str!("../examples/control_flow.rs"),
     ] {
         assert!(transpile(source).is_ok(), "應支援：{source}");
@@ -252,6 +301,12 @@ fn rejects_control_flow_semantic_errors() {
             "fn main() { loop { break; } if true { continue; } }",
             "迴圈內",
         ),
+        ("fn main() { for i in 0..3 { i = 2; } }", "不可變"),
+        (
+            "fn main() { for i in 0..3 {} let value = i; }",
+            "找不到變數",
+        ),
+        ("fn main() { for i in 0usize..3i32 {} }", "型別不符"),
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
@@ -279,7 +334,13 @@ fn rejects_unsupported_control_flow_forms() {
         "fn main() { if let true = true {} }",
         "fn main() { while let true = true {} }",
         "fn main() { while { true } {} }",
-        "fn main() { for x in 0..3 {} }",
+        "fn main() { for x in [1, 2] {} }",
+        "fn main() { for x in ..3 {} }",
+        "fn main() { for x in 0.. {} }",
+        "fn main() { for x in 0.0..3.0 {} }",
+        "fn main() { for (x, y) in 0..3 {} }",
+        "fn main() { 'outer: for x in 0..3 {} }",
+        "fn main() { #[cfg(any())] for x in 0..3 {} }",
         "fn main() { match 1 { _ => {} } }",
         "fn main() { #[cfg(any())] if true {} }",
         "fn main() { #[cfg(any())] while true {} }",
@@ -568,7 +629,7 @@ fn rejects_line_input_semantic_errors() {
 }
 
 #[test]
-fn rejects_string_vec_and_math_forms_outside_v0_7() {
+fn rejects_string_vec_and_math_forms_outside_v0_8() {
     for source in [
         "fn main() { let s = String::from(\"x\"); }",
         "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s); }",

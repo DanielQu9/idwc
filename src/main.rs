@@ -1,6 +1,13 @@
-use std::{env, error::Error, fs, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    error::Error,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
-const USAGE: &str = "用法：idwc input.rs -o output.c";
+const USAGE: &str = "用法：idwc input.rs -o output.c\n       idwc --help\n       idwc --version";
 
 /// 將 CLI 錯誤寫入 stderr，並回傳非零退出狀態。
 fn main() -> ExitCode {
@@ -24,6 +31,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
+    if input == "--version" || input == "-V" {
+        if args.next().is_some() {
+            return Err(USAGE.into());
+        }
+        println!("idwc {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.next().as_deref() != Some(std::ffi::OsStr::new("-o")) {
         return Err(USAGE.into());
     }
@@ -41,7 +55,38 @@ fn run() -> Result<(), Box<dyn Error>> {
     let source = fs::read_to_string(&input)
         .map_err(|error| format!("讀取 {} 失敗：{error}", input.display()))?;
     let generated = idwc::transpile(&source)?;
-    fs::write(&output, generated)
+    write_atomic(&output, generated.as_bytes())
         .map_err(|error| format!("寫入 {} 失敗：{error}", output.display()))?;
     Ok(())
+}
+
+/// 先完整寫入同目錄暫存檔，再以 rename 取代目標，避免部分輸出。
+fn write_atomic(output: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    for attempt in 0..100 {
+        let temporary = parent.join(format!(".idwc-{}-{attempt}.tmp", std::process::id()));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = fs::rename(&temporary, output) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "無法配置輸出暫存檔",
+    ))
 }

@@ -1,9 +1,12 @@
 [package]
 name = "idwc"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+description = "A strict Rust-subset to standalone C17 transpiler"
+readme = "README.md"
+documentation = "https://docs.rs/idwc"
 
 [dependencies]
 syn = { version = "2", features = ["full"] }

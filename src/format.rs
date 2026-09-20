@@ -9,6 +9,9 @@ pub(crate) fn parse(mac: &syn::Macro) -> Result<(Vec<PrintPart>, Vec<Expr>), Tra
             "僅接受未限定路徑的 print!／println!",
         ));
     }
+    if mac.tokens.is_empty() {
+        return Ok((vec![PrintPart::Text(String::new())], Vec::new()));
+    }
     let parser = |input: syn::parse::ParseStream<'_>| {
         let literal: LitStr = input.parse()?;
         let mut arguments = Vec::new();
