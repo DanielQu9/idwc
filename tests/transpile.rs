@@ -97,6 +97,7 @@ fn stupid_mode_keeps_simple_string_and_vec_operations_direct() {
             let repeated = vec![true; 3];
             let mut positions = vec![0usize];
             positions.push(positions.len());
+            let unused: Vec<i32> = Vec::new();
             println!("{} {:?} {:?}", alias, values, repeated);
         }
         fn marked() -> i32 { 6 }
@@ -111,6 +112,14 @@ fn stupid_mode_keeps_simple_string_and_vec_operations_direct() {
     assert!(generated.contains("repeated[repeated_len++] = true;"));
     assert!(!generated.contains("repeated_value"));
     assert!(!generated.contains("printed_value"));
+    assert!(!generated.contains("(void)values;"));
+    assert!(!generated.contains("(void)values_len;"));
+    assert!(!generated.contains("(void)repeated;"));
+    assert!(!generated.contains("(void)repeated_len;"));
+    assert!(generated.contains("(void)positions;"));
+    assert!(!generated.contains("(void)positions_len;"));
+    assert!(generated.contains("(void)unused;"));
+    assert!(generated.contains("(void)unused_len;"));
 
     let value = generated.find("= marked();").unwrap();
     let index = generated.find("values[index()] = assigned_value").unwrap();

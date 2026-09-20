@@ -1281,6 +1281,7 @@ fn stupid_mode_string_and_vec_output_compiles_and_runs() {
         values[0] = 4;
         let replacement = vec![5, 6];
         values = replacement;
+        let unused: Vec<i32> = Vec::new();
         println!("{} {:?} {}", alias, values, values.len());
     }"#;
     let dir = TestDir::new();

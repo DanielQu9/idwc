@@ -205,7 +205,9 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 
 The command writes a warning to stderr because the result intentionally omits
 strict runtime checks. Its v1.2 collection output keeps simple Vec writes
-direct and uses temporaries only where expression side effects require them.
+direct, uses temporaries only where expression side effects require them, and
+emits `(void)` warning suppressions only for Vec storage or lengths that are not
+read later.
 See the [Stupid Mode contract](docs/stupid-mode.md).
 
 Use `--help` for usage and `--version` or `-V` for the version. Input files

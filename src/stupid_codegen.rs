@@ -67,6 +67,8 @@ struct Generator<'a> {
     binding_names: HashMap<usize, String>,
     token_length_names: HashMap<usize, String>,
     vec_length_names: HashMap<usize, String>,
+    vec_data_reads: HashSet<usize>,
+    vec_length_reads: HashSet<usize>,
     names: NameAllocator,
     in_main: bool,
     string_capacity: usize,
@@ -84,6 +86,8 @@ impl<'a> Generator<'a> {
             binding_names: HashMap::new(),
             token_length_names: HashMap::new(),
             vec_length_names: HashMap::new(),
+            vec_data_reads: HashSet::new(),
+            vec_length_reads: HashSet::new(),
             names: NameAllocator::default(),
             in_main: false,
             string_capacity: options.string_capacity(),
@@ -96,6 +100,8 @@ impl<'a> Generator<'a> {
         self.binding_names.clear();
         self.token_length_names.clear();
         self.vec_length_names.clear();
+        self.vec_data_reads.clear();
+        self.vec_length_reads.clear();
         self.names = NameAllocator::default();
         self.next_temp = 0;
         for name in self.function_names.values() {
@@ -107,6 +113,11 @@ impl<'a> Generator<'a> {
             .map(|parameter| (parameter.id, parameter.name.clone(), parameter.ty))
             .collect::<Vec<_>>();
         collect_bindings(statements, &mut bindings);
+        collect_vec_reads(
+            statements,
+            &mut self.vec_data_reads,
+            &mut self.vec_length_reads,
+        );
         for (id, source_name, _) in &bindings {
             let name = self.names.allocate(source_name);
             self.binding_names.insert(*id, name);
@@ -839,8 +850,12 @@ impl<'a> Generator<'a> {
         ));
         self.line(&format!("size_t {length} = 0;"));
         self.vec_fill(&name, &length, value);
-        self.line(&format!("(void){name};"));
-        self.line(&format!("(void){length};"));
+        if !self.vec_data_reads.contains(&id) {
+            self.line(&format!("(void){name};"));
+        }
+        if !self.vec_length_reads.contains(&id) {
+            self.line(&format!("(void){length};"));
+        }
     }
 
     fn vec_assign(&mut self, id: usize, value: &Expression) {
@@ -1103,6 +1118,132 @@ fn collect_bindings(statements: &[Statement], bindings: &mut Vec<(usize, String,
             | Statement::Return(_)
             | Statement::Evaluate(_) => {}
         }
+    }
+}
+
+/// Finds Vec storage and length values that generated C will read after declaration.
+fn collect_vec_reads(
+    statements: &[Statement],
+    data_reads: &mut HashSet<usize>,
+    length_reads: &mut HashSet<usize>,
+) {
+    for statement in statements {
+        match statement {
+            Statement::Let { value, .. } | Statement::Assign { value, .. } => {
+                collect_expression_vec_reads(value, data_reads, length_reads);
+            }
+            Statement::AssignIndex { index, value, .. }
+            | Statement::VecAssignIndex { index, value, .. } => {
+                collect_expression_vec_reads(index, data_reads, length_reads);
+                collect_expression_vec_reads(value, data_reads, length_reads);
+            }
+            Statement::VecPush { value, .. } => {
+                collect_expression_vec_reads(value, data_reads, length_reads);
+            }
+            Statement::Block(body) | Statement::Loop(body) => {
+                collect_vec_reads(body, data_reads, length_reads);
+            }
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_expression_vec_reads(condition, data_reads, length_reads);
+                collect_vec_reads(then_branch, data_reads, length_reads);
+                if let Some(else_branch) = else_branch {
+                    collect_vec_reads(else_branch, data_reads, length_reads);
+                }
+            }
+            Statement::While { condition, body } => {
+                collect_expression_vec_reads(condition, data_reads, length_reads);
+                collect_vec_reads(body, data_reads, length_reads);
+            }
+            Statement::ForRange {
+                start, end, body, ..
+            } => {
+                collect_expression_vec_reads(start, data_reads, length_reads);
+                collect_expression_vec_reads(end, data_reads, length_reads);
+                collect_vec_reads(body, data_reads, length_reads);
+            }
+            Statement::Print { arguments, .. } => {
+                for argument in arguments {
+                    collect_expression_vec_reads(argument, data_reads, length_reads);
+                }
+            }
+            Statement::Return(value) => {
+                if let Some(value) = value {
+                    collect_expression_vec_reads(value, data_reads, length_reads);
+                }
+            }
+            Statement::Evaluate(value) => {
+                collect_expression_vec_reads(value, data_reads, length_reads);
+            }
+            Statement::Break | Statement::Continue => {}
+        }
+    }
+}
+
+fn collect_expression_vec_reads(
+    expression: &Expression,
+    data_reads: &mut HashSet<usize>,
+    length_reads: &mut HashSet<usize>,
+) {
+    match &expression.kind {
+        ExpressionKind::Variable(id) if matches!(expression.ty, Type::Vec(_)) => {
+            data_reads.insert(*id);
+            length_reads.insert(*id);
+        }
+        ExpressionKind::VecIndex { id, index } => {
+            data_reads.insert(*id);
+            collect_expression_vec_reads(index, data_reads, length_reads);
+        }
+        ExpressionKind::VecLength(id) => {
+            length_reads.insert(*id);
+        }
+        ExpressionKind::Index { index, .. } => {
+            collect_expression_vec_reads(index, data_reads, length_reads);
+        }
+        ExpressionKind::Array(values)
+        | ExpressionKind::Vec(values)
+        | ExpressionKind::Call(_, values) => {
+            for value in values {
+                collect_expression_vec_reads(value, data_reads, length_reads);
+            }
+        }
+        ExpressionKind::ArrayRepeat(value, _)
+        | ExpressionKind::VecRepeat(value, _)
+        | ExpressionKind::StringFrom(value)
+        | ExpressionKind::Powi2(value)
+        | ExpressionKind::Unary(_, value) => {
+            collect_expression_vec_reads(value, data_reads, length_reads);
+        }
+        ExpressionKind::Binary(_, left, right) => {
+            collect_expression_vec_reads(left, data_reads, length_reads);
+            collect_expression_vec_reads(right, data_reads, length_reads);
+        }
+        ExpressionKind::Parse {
+            source: ParseSource::Token { index, .. },
+        } => collect_expression_vec_reads(index, data_reads, length_reads),
+        ExpressionKind::Integer(_)
+        | ExpressionKind::Usize(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::Boolean(_)
+        | ExpressionKind::Variable(_)
+        | ExpressionKind::ArrayLength(_)
+        | ExpressionKind::VecNew
+        | ExpressionKind::StringLiteral(_)
+        | ExpressionKind::StringNew
+        | ExpressionKind::ReadString
+        | ExpressionKind::ReadLine(_)
+        | ExpressionKind::SplitWhitespace(_)
+        | ExpressionKind::TokensLength(_)
+        | ExpressionKind::Parse {
+            source: ParseSource::TrimmedString(_),
+        }
+        | ExpressionKind::Unit
+        | ExpressionKind::ReadI32
+        | ExpressionKind::ReadF64
+        | ExpressionKind::FlushStdout => {}
     }
 }
 

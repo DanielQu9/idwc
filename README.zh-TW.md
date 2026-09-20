@@ -195,7 +195,8 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 
 此命令會在 stderr 顯示提示，因為輸出刻意省略嚴格 runtime 檢查。完整規則
 中，v1.2 collection 的簡單 Vec 寫入會保持直接，只有 expression 副作用需要
-時才建立 temporary。完整規則請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
+時才建立 temporary；只有後續未讀取的 Vec storage 或 length 才生成 `(void)`
+warning suppression。完整規則請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
 
 使用 `--help` 查看用法，使用 `--version` 或 `-V` 查看版本。輸入必須是
 `.rs`，輸出必須是 `.c`。`-o` 可以省略：`idwc path/program.rs` 會寫入

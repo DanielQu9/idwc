@@ -6,6 +6,12 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Stupid Mode omits redundant `(void)` Vec warning suppressions when generated
+  C later reads the storage or length, while retaining them for truly unused
+  objects so warning-as-error builds still compile.
+
 ## [1.2.1] - 2026-09-21
 
 ### Changed

@@ -34,6 +34,8 @@ idwc --stupid input.rs -o output.c
 - 簡單 Vec `push`、repeat value 與索引賦值直接生成 C 寫入；可重用的混合
   formatter 引數也保持 inline。若右側有副作用，會先求值至 temporary 再計算
   index；Vec binding 間的 move 使用一次明確 copy loop。
+- 只有後續未讀取的 Vec storage 或 length object 才生成 `(void)` cast，在避免
+  unused warning 的同時不干擾一般輸出的可讀性。
 
 ## 刻意省略的保證
 

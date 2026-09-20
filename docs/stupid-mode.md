@@ -40,6 +40,8 @@ Rust-equivalent runtime behavior.
   Reusable mixed-format arguments also stay inline. A side-effecting right-hand
   side is evaluated into a temporary before the index expression; moving one
   Vec binding into another uses one explicit copy loop.
+- `(void)` casts are emitted only for Vec storage or length objects that are not
+  read later, preventing unused warnings without cluttering ordinary output.
 
 ## Deliberately omitted guarantees
 
