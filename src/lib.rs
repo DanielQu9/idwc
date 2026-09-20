@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.9.0 穩定 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
+//! v1.0.0 穩定 scalar、固定陣列、限定行輸入、整數 range、控制流程與函式，入口為 [`transpile`]。
 
 mod codegen;
 mod format;

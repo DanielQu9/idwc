@@ -948,7 +948,7 @@ fn cli_checks_arguments_and_provides_help() {
     let help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--help"));
     assert!(String::from_utf8_lossy(&help.stdout).contains("idwc input.rs -o output.c"));
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 0.9.0\n");
+    assert_eq!(version.stdout, b"idwc 1.0.0\n");
     for args in [
         vec![],
         vec!["input.rs"],

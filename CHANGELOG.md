@@ -6,6 +6,21 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-20
+
+### Added
+
+- crates.io package metadata, installation instructions, and a repeatable
+  release checklist.
+- A documented compatibility contract for the public Rust API, strict-mode
+  behavior, runtime diagnostics, and generated C text.
+
+### Changed
+
+- Declared the tested Rust subset and bilingual strict semantic specification
+  stable for the 1.x release line.
+- Updated the crate, CLI, documentation, and version tests to 1.0.0.
+
 ## [0.9.0] - 2026-09-20
 
 ### Added

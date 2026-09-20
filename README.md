@@ -3,7 +3,7 @@
 **I don't write C.**
 
 [繁體中文](README.zh-TW.md) · [Strict semantics](docs/strict-semantics.md) ·
-[Changelog](CHANGELOG.md)
+[Changelog](CHANGELOG.md) · [Release process](RELEASING.md)
 
 *Because life's too short to manually manage every pointer.*
 
@@ -80,7 +80,7 @@ The exact contract is documented in [Strict semantics](docs/strict-semantics.md)
 
 ## Milestones
 
-The current version is **v0.9.0**.
+The current version is **v1.0.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -93,12 +93,11 @@ The current version is **v0.9.0**.
 | v0.7.0 | Line input, token parsing, and `powi(2)` | Completed |
 | v0.8.0 | Integer range `for` and core-subset completion | Completed |
 | v0.9.0 | API, diagnostics, portability, and release hardening | Completed |
-| v1.0.0 | Frozen strict Rust subset and stable documentation | Planned |
+| v1.0.0 | Frozen strict Rust subset and stable documentation | Completed |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C | Planned |
 
-Additional integer types and general String operations are deferred until after
-v1.0.0. The v1.0 release is intended to stabilize the existing subset rather
-than expand toward full Rust.
+Additional integer types and general String operations are deferred. The v1.0
+release stabilizes the existing subset rather than expanding toward full Rust.
 
 ## Requirements
 
@@ -107,6 +106,12 @@ than expand toward full Rust.
 - `-lm` on platforms that require it for generated floating-point programs.
 
 ## Quick start
+
+Install the released CLI from crates.io:
+
+```bash
+cargo install idwc
+```
 
 Build and translate Hello World:
 
@@ -220,6 +225,11 @@ one-based `SourceLocation`. `Display` includes the category and location for
 CLI-friendly diagnostics. Errors concerning the whole program, such as a
 missing `main`, may not have a source location.
 
+IdwC 1.x follows Semantic Versioning for this public Rust API and the accepted
+strict-mode behavior described in the semantic contract. Generated C remains
+readable, but its whitespace, helper layout, and internal identifier names are
+not a stable text-level API.
+
 `src/main.rs` handles only CLI arguments and file I/O. Translation rules stay
 in the library. Runtime C fragments under `src/runtime/` are embedded only when
 the translated program needs them. The generated result remains one C file.
@@ -240,7 +250,7 @@ suite with Clang and GCC on Linux and Clang on macOS.
 
 ## Planned Stupid Mode
 
-After strict mode reaches v1.0.0, v1.1.0 will add `-s` / `--stupid`. It will
+With strict mode stable in v1.0.0, v1.1.0 will add `-s` / `--stupid`. It will
 prefer clean, editable C and original source names where safe, and may relax
 documented checks or floating-point guarantees. Strict mode will remain the
 default, and `transpile(source)` will always retain strict behavior.

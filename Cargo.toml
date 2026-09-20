@@ -1,12 +1,15 @@
 [package]
 name = "idwc"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "A strict Rust-subset to standalone C17 transpiler"
 readme = "README.md"
 documentation = "https://docs.rs/idwc"
+repository = "https://github.com/DanielQu9/idwc"
+keywords = ["transpiler", "compiler", "rust", "c", "c17"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 proc-macro2 = { version = "1", features = ["span-locations"] }

@@ -2,7 +2,7 @@
 
 [繁體中文](strict-semantics.zh-TW.md) · [Back to README](../README.md)
 
-This document defines the strict translation contract for IdwC v0.9.0.
+This document defines the strict translation contract for IdwC v1.0.0.
 Anything not listed here is rejected. The generated program aims to preserve
 the behavior of the accepted Rust subset without relying on C undefined
 behavior.
@@ -230,6 +230,20 @@ node is handled by a whitelist; unsupported syntax cannot silently disappear.
 
 These are translation-time diagnostics. Runtime failure strings and status 101
 are separate contracts described in the input, array, and arithmetic sections.
+
+## Compatibility contract
+
+- IdwC 1.x follows Semantic Versioning for the public Rust API and accepted
+  strict-mode behavior documented here.
+- A minor release may accept additional source programs. It will not silently
+  reinterpret a program already accepted by this contract.
+- Bug fixes may change generated C while restoring documented behavior.
+- Generated whitespace, comments, helper ordering, and internal identifiers
+  are implementation details. Consumers must compile the C output rather than
+  depend on byte-for-byte source stability.
+- Runtime diagnostic text explicitly listed in this document remains part of
+  the strict contract. Other explanatory wording may improve without a major
+  version change.
 
 ## Generated C and verification
 

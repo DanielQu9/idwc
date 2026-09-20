@@ -2,7 +2,7 @@
 
 [English](strict-semantics.md) · [返回 README](../README.zh-TW.md)
 
-本文定義 IdwC v0.9.0 嚴格模式的翻譯契約。未列出的內容一律拒絕。生成程式
+本文定義 IdwC v1.0.0 嚴格模式的翻譯契約。未列出的內容一律拒絕。生成程式
 應在不依賴 C 未定義行為的前提下，保留所接受 Rust 子集的行為。
 
 ## 程式與函式
@@ -209,6 +209,17 @@ Cargo dependencies。
 
 以上是轉譯階段的診斷；輸入、陣列及算術章節中的 runtime 診斷文字與狀態
 101 是另一組契約。
+
+## 相容性契約
+
+- IdwC 1.x 的公開 Rust API，以及本文記錄的嚴格模式接受行為，遵守
+  Semantic Versioning。
+- Minor release 可以接受更多來源程式，但不會默默重新解釋本文已接受的程式。
+- Bug fix 可以在恢復文件所述行為時改變生成的 C。
+- 生成結果的空白、comment、helper 順序與內部識別字屬於實作細節；使用者
+  應編譯 C 輸出，不應依賴逐 byte 不變的原始碼。
+- 本文明確列出的 runtime 診斷文字屬於嚴格契約；其他說明文字可在不提升
+  major version 的情況下改善。
 
 ## 生成 C 與驗證
 
