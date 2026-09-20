@@ -1,5 +1,5 @@
 //! 將經過白名單驗證的 Rust 子集轉成獨立的 C17 程式。
-//! v0.5.0 支援 i32／f64／bool、控制流程、函式與有限 stdin，入口為 [`transpile`]。
+//! v0.6.0 支援 scalar、固定陣列、控制流程、函式與有限 stdin，入口為 [`transpile`]。
 
 mod codegen;
 mod format;
@@ -40,7 +40,7 @@ impl std::error::Error for TranspileError {
     }
 }
 
-/// 將 i32／f64／bool、控制流程、函式與有限輸入輸出的 Rust 子集轉成 C17 原始碼。
+/// 將 scalar、固定陣列、控制流程、函式與有限輸入輸出的 Rust 子集轉成 C17 原始碼。
 /// 不會執行輸入原始碼或展開使用者巨集。
 ///
 /// # Errors

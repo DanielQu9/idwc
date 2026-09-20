@@ -65,7 +65,7 @@ translation capabilities below distinguish completed work from planned features.
 
 ### Milestones
 
-The current version is **v0.5.0**.
+The current version is **v0.6.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ The current version is **v0.5.0**.
 | v0.3.0 | Conditionals and loops | Completed (statement forms within the subset below) |
 | v0.4.0 | Functions, basic output, and limited typed stdin | Completed (within the subset below) |
 | v0.5.0 | f64 types, basic floating-point operations, and input/output | Completed (within the subset below) |
-| v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Planned |
+| v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Completed (within the subset below) |
 | v0.7.0 | Line input, string splitting/parsing, and limited math functions | Planned |
 | v1.0.0 | Stable Rust subset, tests, and documentation | Planned |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C output | Planned |
@@ -172,7 +172,28 @@ iterators, generics, or borrowing.
 
 Line/string input remains **planned**.
 
-### Current release: v0.5.0
+#### Fixed-size array support (v0.6.0)
+
+**v0.6.0** supports local one-dimensional `[T; N]` arrays whose element type is
+`i32`, `usize`, `f64`, or `bool`. Array literals, `[value; N]`, whole-array copy
+and assignment, `.len()`, element reads, element assignment, and arithmetic
+compound assignment are accepted. Lengths are compile-time integer literals
+from 0 through 4096. Array bindings retain Rust value-copy behavior rather than
+decaying to C pointers.
+
+Every element read or write evaluates its `usize` index once and checks it
+before accessing C storage. Failure flushes stdout, writes
+`idwc: array index out of bounds` to stderr, and exits with status 101. The C
+backend uses one unused storage element for `[T; 0]`, while its logical length
+remains zero, so every attempted access still fails before touching storage.
+The restricted `usize` support includes literals, bindings, function scalar
+parameters/returns, checked arithmetic/comparisons, and formatting with `{}`.
+
+Nested arrays, array function parameters/returns, slices, references, iterator
+methods, array equality, and indexing temporary array expressions remain
+unsupported. Indexing is currently limited to a named local array binding.
+
+### Current release: v0.6.0
 
 Requires Rust 1.88 or newer (edition 2024) to build the transpiler, and Clang or GCC
 to compile the generated C17 program.
@@ -232,6 +253,16 @@ Link floating-point C programs with `-lm` (required on some platforms).
 This example uses no String, Vec, casts, or `powi`; those input patterns remain
 outside this release's subset.
 
+The arrays example exercises value copying, `.len()`, `usize` indexing,
+mutation, and bounds-checked element access:
+
+```bash
+cargo run -- examples/arrays.rs -o /tmp/idwc-arrays.c
+clang -std=c17 /tmp/idwc-arrays.c -o /tmp/idwc-arrays
+/tmp/idwc-arrays
+# first = 13, last = 16, original first = 12, length = 4
+```
+
 To use the `idwc` executable directly, run `cargo build` and then
 `./target/debug/idwc examples/hello.rs -o /tmp/idwc-hello.c`.
 Use `--help` for CLI usage. Input must have a `.rs` extension and output `.c`.
@@ -253,8 +284,8 @@ fn main() {
 
 - Exactly one private `fn main()`, without parameters, generics, attributes,
   modifiers, or an explicit return type.
-- Additional private, nongeneric functions with `i32` / `f64` / `bool` value parameters
-  (including `mut` parameters) and `i32` / `f64` / `bool` / unit returns. Omitted return
+- Additional private, nongeneric functions with `i32` / `usize` / `f64` / `bool`
+  scalar parameters (including `mut` parameters) and scalar or unit returns. Omitted return
   types mean unit; helpers may explicitly return `()`. Forward calls and
   recursion are supported; calling `main` and indirect calls are rejected.
 - `return;`, `return ();`, and typed `return value;`; typed functions also
@@ -263,12 +294,15 @@ fn main() {
   value expression, or returns in both `if` / `else` branches. A loop alone does
   not establish a guaranteed return. Parameters are copied and each function
   has independent local scopes. Unit bindings and unit parameters are rejected.
-- Initialized `let` and `let mut` bindings, with optional `i32`, `f64`, or `bool`
-  annotations. Unsuffixed integers default to `i32`; the `i32` suffix is allowed.
+- Initialized `let` and `let mut` bindings, with optional `i32`, `usize`, `f64`,
+  `bool`, or one-dimensional fixed-array annotations. Unsuffixed integers
+  default to `i32`, except where a `usize` context is required; `i32` and
+  `usize` suffixes are allowed.
 - Integer literals in decimal, hex, octal, and binary, including `i32::MIN`
   written as `-2147483648`. Paths such as `i32::MIN` are not supported yet.
-- Arithmetic `+`, `-`, `*`, `/`, unary `-`, and comparisons `<`, `<=`, `>`, `>=`
-  for matching `i32` or `f64` operands; `%` is integer-only. Equality `==` / `!=`
+- Arithmetic `+`, `-`, `*`, `/` and comparisons `<`, `<=`, `>`, `>=` for
+  matching `i32`, `usize`, or `f64` operands; unary `-` accepts `i32` and `f64`,
+  and `%` accepts `i32` and `usize`. Equality `==` / `!=`
   also supports `bool`. Mixed numeric types are rejected.
 - Decimal/scientific floating literals defaulting to `f64`, with optional `f64`
   suffix and underscores (including `1f64`). Nondecimal floating literals and
@@ -278,6 +312,10 @@ fn main() {
 - Plain assignment and arithmetic compound assignment (`+=`, `-=`, `*=`, `/=`,
   `%=`) to mutable bindings; `%=` is integer-only. Assignment is a statement,
   not a value expression.
+- Local `[T; N]` arrays for `T = i32`, `usize`, `f64`, or `bool`, including
+  literals, repeat initialization, value copies, whole-array assignment,
+  `.len()`, and `usize` element reads/writes. Lengths are literal values no
+  greater than 4096. Every access performs a runtime bounds check.
 - Multiple statements, nested statement blocks, same-scope and nested shadowing,
   and optional empty main. Value-returning blocks are not supported.
 - Statement-form `if` / `else if` / `else` with `bool` conditions and
@@ -291,7 +329,7 @@ fn main() {
   result; arithmetic checks and call side effects still run. Unit calls may
   omit the semicolon at the end of a block.
 - `print!` / `println!` with a string literal and sequential `{}` placeholders for
-  `i32`, `f64`, and `bool`; fixed precision `{:.0}` through `{:.18}` accepts only
+  `i32`, `usize`, `f64`, and `bool`; fixed precision `{:.0}` through `{:.18}` accepts only
   `f64`. A trailing comma is allowed. Empty-argument
   `println!()` is not supported; use `println!("")`.
 - The exact qualified calls `idwc::io::read_i32()`, `idwc::io::read_f64()`, and
@@ -316,8 +354,10 @@ All branches and loop bodies are validated, including unreachable ones.
 Unsupported syntax is reported as an error rather than silently ignored.
 
 Value-producing control-flow expressions, `break` with a value, loop labels,
-`if let`, `while let`, and `match` are not supported. Integer-range `for`, arrays,
-indexing, and additional integer types remain planned. `f32`, numeric casts,
+`if let`, `while let`, and `match` are not supported. Integer-range `for`, nested
+arrays, slices, and integer types other than `i32` / restricted `usize` remain
+planned. Array parameters/returns and indexing non-binding expressions are
+rejected. `f32`, numeric casts,
 floating remainder, associated constant paths (such as `f64::NAN`), and math
 methods such as `powi` are rejected. Line/string input is targeted for v0.7.0
 as described above.
@@ -391,6 +431,13 @@ Out-of-range literals are translation errors. Rust compile-time lints for
 constant overflow or unconditional panics are not replicated; supported
 arithmetic expressions are checked at runtime, including discarded results.
 
+Restricted `usize` values map to C `size_t`. Addition, subtraction, and
+multiplication check against `SIZE_MAX`; division and remainder reject zero.
+These failures use the same integer diagnostics and status 101. This target-sized
+type is currently exposed mainly for array lengths and indices. Generated C
+containing `usize` includes a static assertion that its target width matches the
+Rust host which ran IdwC, so a mismatched cross-target compile fails explicitly.
+
 #### Floating-point semantics and formatting
 
 Generated C requires 53-bit binary64 `double`, a compatible bit layout, and
@@ -435,6 +482,8 @@ parameter/return types and guaranteed returns.
 `src/format.rs` parses the supported `print!` / `println!` format. `src/codegen.rs` generates
 C from IR, using temporaries to preserve evaluation order and conditional
 statements for short-circuit operands; it does not inspect the syn AST.
+Array initialization and assignment also use ordered temporaries, preserve
+whole-array value copies, and check each index before generating an access.
 `while` is lowered to a C `for (;;)` with a condition check at the start of each
 iteration, so generated arithmetic temporaries and `continue` preserve Rust
 evaluation behavior. `loop` uses a C `for (;;)` without a condition check.
@@ -460,6 +509,8 @@ validation and boundaries, EOF and I/O errors, prompts flushed before input,
 explicit flush failure with a closed output pipe,
 floating-point type errors, arithmetic, special values, rounding midpoints,
 subnormal/large-value formatting, and float token range validation,
+fixed-array initialization/copy/mutation, `usize`, index evaluation order, and
+bounds failures under UndefinedBehaviorSanitizer,
 CLI success/error paths,
 and compilation of trusted fixtures with both Rust and C17. Runtime comparisons
 check output bytes and exit status. End-to-end tests require `rustc` and Clang

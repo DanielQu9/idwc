@@ -296,6 +296,91 @@ fn generated_c_matches_rust_output() {
     }
 }
 
+/// 固定陣列的初始化、複製、索引求值順序與修改應符合 Rust。
+#[test]
+fn fixed_arrays_match_rust_output() {
+    let cases = [
+        include_str!("../examples/arrays.rs"),
+        r#"fn main() {
+            let mut values = [mark(1), mark(2), mark(3)];
+            let repeated = [mark(4); 3];
+            values[index()] += mark(5);
+            values = [values[1], values[0], values[2]];
+            println!("| {} {} {} {}", values[0], values[1], values[2], repeated[2]);
+        }
+        fn mark(value: i32) -> i32 { print!("{} ", value); value }
+        fn index() -> usize { print!("i "); 1 }"#,
+        r#"fn main() {
+            let mut numbers: [usize; 4] = [1, 2usize, 3, 4];
+            let original = numbers;
+            let mut i: usize = 0;
+            while i < numbers.len() { numbers[i] *= 2; i += 1; }
+            println!("{} {} {}", numbers[3], original[3], numbers.len());
+        }
+        "#,
+        r#"fn main() {
+            let floats = [1.25, -0.0, 3.5];
+            let flags = [true, false, true];
+            let empty: [i32; 0] = [];
+            println!("{} {} {} {}", floats[0], floats[1], flags[2], empty.len());
+        }"#,
+    ];
+    let dir = TestDir::new();
+    for source in cases {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, b"");
+        let c = run_with_input(&c, b"");
+        assert!(rust.status.success(), "{source}");
+        assert_same_output(&rust, &c);
+    }
+}
+
+/// 動態越界必須在存取前停止，且 C 端不得觸發未定義行為。
+#[test]
+fn array_bounds_fail_without_undefined_behavior() {
+    let cases = [
+        (
+            r#"fn main() {
+                let values = [10, 20, 30];
+                println!("before");
+                println!("{}", values[out_of_bounds()]);
+            }
+            fn out_of_bounds() -> usize { 3 }"#,
+            b"before\n".as_slice(),
+        ),
+        (
+            r#"fn main() {
+                let mut values = [10, 20, 30];
+                println!("before");
+                values[out_of_bounds()] = right_hand_side();
+            }
+            fn right_hand_side() -> i32 { println!("right"); 40 }
+            fn out_of_bounds() -> usize { println!("index"); 3 }"#,
+            b"before\nright\nindex\n".as_slice(),
+        ),
+        (
+            r#"fn main() {
+                let values: [i32; 0] = [];
+                println!("before");
+                println!("{}", values[out_of_bounds()]);
+            }
+            fn out_of_bounds() -> usize { 0 }"#,
+            b"before\n".as_slice(),
+        ),
+    ];
+    let dir = TestDir::new();
+    for (source, expected_stdout) in cases {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, b"");
+        let c = run_with_input(&c, b"");
+        assert_eq!(rust.status.code(), Some(101));
+        assert_eq!(c.status.code(), Some(101));
+        assert_eq!(rust.stdout, expected_stdout);
+        assert_eq!(c.stdout, rust.stdout);
+        assert_eq!(c.stderr, b"idwc: array index out of bounds\n");
+    }
+}
+
 /// 比較控制流程的輸出、scope、短路條件與巢狀 break／continue。
 #[test]
 fn control_flow_matches_rust_output() {
@@ -468,6 +553,16 @@ fn arithmetic_failures_are_checked_without_undefined_behavior() {
         ("let zero = 0; let y = 1 % zero;", "division by zero"),
         ("let mut x = 2147483647; x += 1;", "integer overflow"),
         ("let x = 2147483647; x + 1;", "integer overflow"),
+        ("let x: usize = 0; let y = x - 1;", "integer overflow"),
+        ("let mut x: usize = 0; x -= 1;", "integer overflow"),
+        (
+            "let zero: usize = 0; let y = 1usize / zero;",
+            "division by zero",
+        ),
+        (
+            "let zero: usize = 0; let y = 1usize % zero;",
+            "division by zero",
+        ),
         // 左 operand 與第一個 println! 引數應先失敗，且不先輸出 prefix。
         (
             "let x = 2147483647; let zero = 0; let y = (x + 1) + (1 / zero);",

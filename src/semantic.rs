@@ -5,8 +5,8 @@ use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp, ext::IdentExt};
 use crate::{
     TranspileError,
     ir::{
-        BinaryOp, Expression, ExpressionKind, Function, Parameter, Program, Statement, Type,
-        UnaryOp,
+        ArrayElement, BinaryOp, Expression, ExpressionKind, Function, Parameter, Program,
+        Statement, Type, UnaryOp,
     },
 };
 
@@ -52,13 +52,14 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
             }
             binding_pattern(&parameter.pat)?;
             let ty = parse_type(&parameter.ty)?;
-            require_value(ty)?;
+            require_parameter_type(ty)?;
             parameters.push(ty);
         }
         let return_type = match &function.sig.output {
             syn::ReturnType::Default => Type::Unit,
             syn::ReturnType::Type(_, ty) => parse_type(ty)?,
         };
+        require_return_type(return_type)?;
         if functions
             .insert(
                 name.clone(),
@@ -142,7 +143,12 @@ impl Analyzer<'_> {
                 if index + 1 == block.stmts.len()
                     && let Stmt::Expr(expr, None) = statement
                 {
-                    match self.expression(expr) {
+                    let value = if self.return_type == Type::Unit {
+                        self.expression(expr)
+                    } else {
+                        self.expression_expected(expr, self.return_type)
+                    };
+                    match value {
                         Ok(value) => {
                             if self.return_type == Type::Unit && value.ty != Type::Unit {
                                 return Err(TranspileError::Unsupported(
@@ -220,7 +226,7 @@ impl Analyzer<'_> {
                 let value = ret
                     .expr
                     .as_ref()
-                    .map(|expr| self.expression(expr))
+                    .map(|expr| self.expression_expected(expr, self.return_type))
                     .transpose()?;
                 same_type(
                     self.return_type,
@@ -234,8 +240,19 @@ impl Analyzer<'_> {
                 Ok(Statement::Evaluate(value))
             }
             Stmt::Expr(Expr::Assign(assign), _) if assign.attrs.is_empty() => {
+                if let Expr::Index(index) = assign.left.as_ref() {
+                    let (binding, index, element) = self.array_index(index, true)?;
+                    let value = self.expression_expected(&assign.right, element.ty())?;
+                    return Ok(Statement::AssignIndex {
+                        id: binding.id,
+                        length: array_parts(binding.ty).expect("陣列 target 已驗證").1,
+                        index,
+                        value,
+                        op: None,
+                    });
+                }
                 let binding = self.assignment_target(&assign.left)?;
-                let value = self.expression(&assign.right)?;
+                let value = self.expression_expected(&assign.right, binding.ty)?;
                 same_type(binding.ty, value.ty)?;
                 Ok(Statement::Assign {
                     id: binding.id,
@@ -252,8 +269,20 @@ impl Analyzer<'_> {
                     _ => None,
                 };
                 if let Some(op) = op {
+                    if let Expr::Index(index) = binary.left.as_ref() {
+                        let (binding, index, element) = self.array_index(index, true)?;
+                        let right = self.expression_expected(&binary.right, element.ty())?;
+                        validate_binary_types(op, element.ty(), right.ty)?;
+                        return Ok(Statement::AssignIndex {
+                            id: binding.id,
+                            length: array_parts(binding.ty).expect("陣列 target 已驗證").1,
+                            index,
+                            value: right,
+                            op: Some(op),
+                        });
+                    }
                     let binding = self.assignment_target(&binary.left)?;
-                    let right = self.expression(&binary.right)?;
+                    let right = self.expression_expected(&binary.right, binding.ty)?;
                     let left = Expression {
                         ty: binding.ty,
                         kind: ExpressionKind::Variable(binding.id),
@@ -349,7 +378,11 @@ impl Analyzer<'_> {
         if init.diverge.is_some() {
             return Err(TranspileError::Unsupported("不接受 let-else"));
         }
-        let value = self.expression(&init.expr)?;
+        let value = if let Some(annotation) = annotation {
+            self.expression_expected(&init.expr, annotation)?
+        } else {
+            self.expression(&init.expr)?
+        };
         require_value(value.ty)?;
         if let Some(annotation) = annotation {
             same_type(annotation, value.ty)?;
@@ -378,7 +411,7 @@ impl Analyzer<'_> {
             .map(|expr| self.expression(expr))
             .collect::<Result<Vec<_>, _>>()?;
         for argument in &arguments {
-            require_value(argument.ty)?;
+            require_scalar(argument.ty)?;
         }
         for part in &parts {
             if let crate::ir::PrintPart::Argument {
@@ -435,6 +468,21 @@ impl Analyzer<'_> {
                 })
             }
             Expr::Call(call) if call.attrs.is_empty() => self.call(call),
+            Expr::Array(array) if array.attrs.is_empty() => self.array_literal(array, None),
+            Expr::Repeat(repeat) if repeat.attrs.is_empty() => self.array_repeat(repeat, None),
+            Expr::Index(index) if index.attrs.is_empty() => {
+                let (binding, index, element) = self.array_index(index, false)?;
+                let (_, length) = array_parts(binding.ty).expect("陣列 access 已驗證");
+                Ok(Expression {
+                    ty: element.ty(),
+                    kind: ExpressionKind::Index {
+                        id: binding.id,
+                        length,
+                        index: Box::new(index),
+                    },
+                })
+            }
+            Expr::MethodCall(call) if call.attrs.is_empty() => self.method_call(call),
             Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
                 Lit::Float(float) => {
                     if !matches!(float.suffix(), "" | "f64") {
@@ -453,8 +501,16 @@ impl Analyzer<'_> {
                     float_expression(integer.base10_digits())
                 }
                 Lit::Int(integer) => Ok(Expression {
-                    ty: Type::I32,
-                    kind: ExpressionKind::Integer(integer_value(integer, false)?),
+                    ty: if integer.suffix() == "usize" {
+                        Type::Usize
+                    } else {
+                        Type::I32
+                    },
+                    kind: if integer.suffix() == "usize" {
+                        ExpressionKind::Usize(usize_value(integer)?)
+                    } else {
+                        ExpressionKind::Integer(integer_value(integer, false)?)
+                    },
                 }),
                 Lit::Bool(boolean) => Ok(Expression {
                     ty: Type::Bool,
@@ -488,7 +544,7 @@ impl Analyzer<'_> {
                 }
                 let operand = self.expression(&unary.expr)?;
                 if matches!(op, UnaryOp::Negate) {
-                    require_number(operand.ty)?;
+                    require_signed_number(operand.ty)?;
                 } else {
                     same_type(ty, operand.ty)?;
                 }
@@ -514,12 +570,166 @@ impl Analyzer<'_> {
                     BinOp::Or(_) => BinaryOp::Or,
                     _ => return Err(TranspileError::Unsupported("不接受此二元運算")),
                 };
-                let left = self.expression(&binary.left)?;
-                let right = self.expression(&binary.right)?;
+                let (left, right) = if is_unsuffixed_integer(&binary.left) {
+                    let right = self.expression(&binary.right)?;
+                    (self.expression_expected(&binary.left, right.ty)?, right)
+                } else {
+                    let left = self.expression(&binary.left)?;
+                    let right = self.expression_expected(&binary.right, left.ty)?;
+                    (left, right)
+                };
                 binary_expression(op, left, right)
             }
             _ => Err(TranspileError::Unsupported("不接受此值運算式或其屬性")),
         }
+    }
+
+    /// 只在 Rust 會進行整數字面量推導的位置建立 usize；其餘整數仍預設 i32。
+    fn expression_expected(
+        &self,
+        expr: &Expr,
+        expected: Type,
+    ) -> Result<Expression, TranspileError> {
+        if expected == Type::Usize {
+            if let Some(integer) = unsuffixed_integer(expr) {
+                return usize_expression(integer);
+            }
+            if let Expr::Paren(paren) = expr
+                && paren.attrs.is_empty()
+            {
+                return self.expression_expected(&paren.expr, expected);
+            }
+        }
+        if let Expr::Array(array) = expr
+            && array.attrs.is_empty()
+        {
+            return self.array_literal(array, Some(expected));
+        }
+        if let Expr::Repeat(repeat) = expr
+            && repeat.attrs.is_empty()
+        {
+            return self.array_repeat(repeat, Some(expected));
+        }
+        let value = self.expression(expr)?;
+        same_type(expected, value.ty)?;
+        Ok(value)
+    }
+
+    fn array_literal(
+        &self,
+        array: &syn::ExprArray,
+        expected: Option<Type>,
+    ) -> Result<Expression, TranspileError> {
+        if array.elems.len() > 4096 {
+            return Err(TranspileError::Unsupported("固定陣列長度上限為 4096"));
+        }
+        if let Some(expected) = expected
+            && array_parts(expected).is_none()
+        {
+            return Err(TranspileError::Semantic(format!(
+                "型別不符：預期 {expected:?}，實際為陣列"
+            )));
+        }
+        let expected_element =
+            if let Some(element) = expected.and_then(array_parts).map(|parts| parts.0) {
+                Some(element)
+            } else {
+                array
+                    .elems
+                    .iter()
+                    .find(|expr| !is_unsuffixed_integer(expr))
+                    .map(|expr| self.expression(expr))
+                    .transpose()?
+                    .map(|value| scalar_element(value.ty))
+                    .transpose()?
+            };
+        if let Some((_, length)) = expected.and_then(array_parts)
+            && length != array.elems.len()
+        {
+            return Err(TranspileError::Semantic("陣列長度與型別註記不符".into()));
+        }
+        let mut values = Vec::new();
+        let mut element = expected_element;
+        for expr in &array.elems {
+            let value = if let Some(element) = element {
+                self.expression_expected(expr, element.ty())?
+            } else {
+                self.expression(expr)?
+            };
+            let actual = scalar_element(value.ty)?;
+            if let Some(element) = element {
+                same_type(element.ty(), value.ty)?;
+            } else {
+                element = Some(actual);
+            }
+            values.push(value);
+        }
+        let element = element.ok_or(TranspileError::Unsupported("空陣列需要明確的型別註記"))?;
+        Ok(Expression {
+            ty: Type::Array(element, values.len()),
+            kind: ExpressionKind::Array(values),
+        })
+    }
+
+    fn array_repeat(
+        &self,
+        repeat: &syn::ExprRepeat,
+        expected: Option<Type>,
+    ) -> Result<Expression, TranspileError> {
+        let length = array_length(&repeat.len)?;
+        if let Some(expected) = expected
+            && array_parts(expected).is_none()
+        {
+            return Err(TranspileError::Semantic(format!(
+                "型別不符：預期 {expected:?}，實際為陣列"
+            )));
+        }
+        let expected_parts = expected.and_then(array_parts);
+        if let Some((_, expected_length)) = expected_parts
+            && expected_length != length
+        {
+            return Err(TranspileError::Semantic("陣列長度與型別註記不符".into()));
+        }
+        let value = if let Some((element, _)) = expected_parts {
+            self.expression_expected(&repeat.expr, element.ty())?
+        } else {
+            self.expression(&repeat.expr)?
+        };
+        let element = scalar_element(value.ty)?;
+        Ok(Expression {
+            ty: Type::Array(element, length),
+            kind: ExpressionKind::ArrayRepeat(Box::new(value), length),
+        })
+    }
+
+    fn array_index(
+        &self,
+        index: &syn::ExprIndex,
+        mutable: bool,
+    ) -> Result<(Binding, Expression, ArrayElement), TranspileError> {
+        let binding = self.resolve(&index.expr)?;
+        let (element, _) =
+            array_parts(binding.ty).ok_or(TranspileError::Semantic("只能索引固定陣列".into()))?;
+        if mutable && !binding.mutable {
+            return Err(TranspileError::Semantic("不能修改不可變陣列".into()));
+        }
+        let index = self.expression_expected(&index.index, Type::Usize)?;
+        Ok((binding, index, element))
+    }
+
+    fn method_call(&self, call: &syn::ExprMethodCall) -> Result<Expression, TranspileError> {
+        if call.method != "len" || !call.args.is_empty() || call.turbofish.is_some() {
+            return Err(TranspileError::Unsupported(
+                "陣列方法目前僅支援無引數的 len()",
+            ));
+        }
+        let binding = self.resolve(&call.receiver)?;
+        let (_, length) = array_parts(binding.ty)
+            .ok_or(TranspileError::Semantic("len() 目前僅支援固定陣列".into()))?;
+        Ok(Expression {
+            ty: Type::Usize,
+            kind: ExpressionKind::ArrayLength(length),
+        })
     }
 
     /// 檢查內建 I/O 與使用者函式呼叫的路徑、引數數量與型別。
@@ -594,7 +804,7 @@ impl Analyzer<'_> {
         }
         let mut arguments = Vec::new();
         for (arg, ty) in call.args.iter().zip(&function.parameters) {
-            let value = self.expression(arg)?;
+            let value = self.expression_expected(arg, *ty)?;
             same_type(*ty, value.ty)?;
             arguments.push(value);
         }
@@ -618,6 +828,9 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
         if path.path.is_ident("i32") {
             return Ok(Type::I32);
         }
+        if path.path.is_ident("usize") {
+            return Ok(Type::Usize);
+        }
         if path.path.is_ident("bool") {
             return Ok(Type::Bool);
         }
@@ -625,8 +838,12 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
             return Ok(Type::F64);
         }
     }
+    if let syn::Type::Array(array) = ty {
+        let element = scalar_element(parse_type(&array.elem)?)?;
+        return Ok(Type::Array(element, array_length(&array.len)?));
+    }
     Err(TranspileError::Unsupported(
-        "型別僅接受 i32、f64、bool 與 unit 回傳型別",
+        "型別僅接受 i32、usize、f64、bool、一維固定陣列與 unit 回傳型別",
     ))
 }
 
@@ -646,34 +863,43 @@ fn binary_expression(
     left: Expression,
     right: Expression,
 ) -> Result<Expression, TranspileError> {
-    same_type(left.ty, right.ty)?;
-    require_value(left.ty)?;
-    let ty = match op {
-        BinaryOp::Equal | BinaryOp::NotEqual => Type::Bool,
-        BinaryOp::And | BinaryOp::Or => {
-            same_type(Type::Bool, left.ty)?;
-            Type::Bool
-        }
-        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
-            require_number(left.ty)?;
-            Type::Bool
-        }
-        BinaryOp::Remainder => {
-            if left.ty == Type::F64 {
-                return Err(TranspileError::Unsupported("尚未支援浮點餘數"));
-            }
-            same_type(Type::I32, left.ty)?;
-            Type::I32
-        }
-        _ => {
-            require_number(left.ty)?;
-            left.ty
-        }
-    };
+    let ty = validate_binary_types(op, left.ty, right.ty)?;
     Ok(Expression {
         ty,
         kind: ExpressionKind::Binary(op, Box::new(left), Box::new(right)),
     })
+}
+
+fn validate_binary_types(op: BinaryOp, left: Type, right: Type) -> Result<Type, TranspileError> {
+    same_type(left, right)?;
+    require_scalar(left)?;
+    let ty = match op {
+        BinaryOp::Equal | BinaryOp::NotEqual => Type::Bool,
+        BinaryOp::And | BinaryOp::Or => {
+            same_type(Type::Bool, left)?;
+            Type::Bool
+        }
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+            require_number(left)?;
+            Type::Bool
+        }
+        BinaryOp::Remainder => {
+            if left == Type::F64 {
+                return Err(TranspileError::Unsupported("尚未支援浮點餘數"));
+            }
+            if !matches!(left, Type::I32 | Type::Usize) {
+                return Err(TranspileError::Semantic(
+                    "型別不符：餘數僅接受 i32 或 usize".into(),
+                ));
+            }
+            left
+        }
+        _ => {
+            require_number(left)?;
+            left
+        }
+    };
+    Ok(ty)
 }
 
 /// 浮點字面量採 binary64；無限大字面量拒絕翻譯，極小值可捨入至零。
@@ -694,20 +920,76 @@ fn float_expression(digits: &str) -> Result<Expression, TranspileError> {
 
 /// 算術接受相同型別的整數或浮點數，bool 不做隱式轉換。
 fn require_number(ty: Type) -> Result<(), TranspileError> {
-    if !matches!(ty, Type::I32 | Type::F64) {
+    if !matches!(ty, Type::I32 | Type::Usize | Type::F64) {
         return Err(TranspileError::Semantic(
-            "型別不符：此運算僅接受 i32 或 f64".into(),
+            "型別不符：此運算僅接受 i32、usize 或 f64".into(),
         ));
     }
     Ok(())
 }
 
+fn require_signed_number(ty: Type) -> Result<(), TranspileError> {
+    if !matches!(ty, Type::I32 | Type::F64) {
+        return Err(TranspileError::Semantic(
+            "型別不符：負號僅接受 i32 或 f64".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_scalar(ty: Type) -> Result<(), TranspileError> {
+    if !matches!(ty, Type::I32 | Type::Usize | Type::F64 | Type::Bool) {
+        return Err(TranspileError::Unsupported(
+            "此處僅接受 i32、usize、f64 或 bool",
+        ));
+    }
+    Ok(())
+}
+
+fn require_parameter_type(ty: Type) -> Result<(), TranspileError> {
+    require_scalar(ty).map_err(|_| TranspileError::Unsupported("函式參數暫不支援陣列或 unit"))
+}
+
+fn require_return_type(ty: Type) -> Result<(), TranspileError> {
+    if matches!(ty, Type::Array(_, _)) {
+        return Err(TranspileError::Unsupported("函式回傳值暫不支援陣列"));
+    }
+    Ok(())
+}
+
+fn array_parts(ty: Type) -> Option<(ArrayElement, usize)> {
+    match ty {
+        Type::Array(element, length) => Some((element, length)),
+        _ => None,
+    }
+}
+
+fn scalar_element(ty: Type) -> Result<ArrayElement, TranspileError> {
+    match ty {
+        Type::I32 => Ok(ArrayElement::I32),
+        Type::Usize => Ok(ArrayElement::Usize),
+        Type::F64 => Ok(ArrayElement::F64),
+        Type::Bool => Ok(ArrayElement::Bool),
+        Type::Unit | Type::Array(_, _) => Err(TranspileError::Unsupported(
+            "固定陣列元素僅接受 i32、usize、f64 或 bool",
+        )),
+    }
+}
+
+fn array_length(expr: &Expr) -> Result<usize, TranspileError> {
+    let integer =
+        literal_integer(expr).ok_or(TranspileError::Unsupported("固定陣列長度僅接受整數字面量"))?;
+    let length = usize_value(integer)?;
+    if length > 4096 {
+        return Err(TranspileError::Unsupported("固定陣列長度上限為 4096"));
+    }
+    Ok(length)
+}
+
 /// unit 僅用於函式回傳，不建立 unit 變數、參數或格式引數。
 fn require_value(ty: Type) -> Result<(), TranspileError> {
     if ty == Type::Unit {
-        return Err(TranspileError::Unsupported(
-            "此處僅接受 i32、f64 或 bool，不接受 unit 值",
-        ));
+        return Err(TranspileError::Unsupported("此處不接受 unit 值"));
     }
     Ok(())
 }
@@ -757,6 +1039,32 @@ fn literal_integer(expr: &Expr) -> Option<&syn::LitInt> {
         Expr::Paren(paren) if paren.attrs.is_empty() => literal_integer(&paren.expr),
         _ => None,
     }
+}
+
+fn unsuffixed_integer(expr: &Expr) -> Option<&syn::LitInt> {
+    literal_integer(expr).filter(|integer| integer.suffix().is_empty())
+}
+
+fn is_unsuffixed_integer(expr: &Expr) -> bool {
+    unsuffixed_integer(expr).is_some()
+}
+
+fn usize_expression(integer: &syn::LitInt) -> Result<Expression, TranspileError> {
+    Ok(Expression {
+        ty: Type::Usize,
+        kind: ExpressionKind::Usize(usize_value(integer)?),
+    })
+}
+
+fn usize_value(integer: &syn::LitInt) -> Result<usize, TranspileError> {
+    if !matches!(integer.suffix(), "" | "usize") {
+        return Err(TranspileError::Unsupported(
+            "usize 字面量僅接受無後綴或 usize 後綴",
+        ));
+    }
+    integer
+        .base10_parse::<usize>()
+        .map_err(|_| TranspileError::Semantic("整數字面量超出 usize 範圍".into()))
 }
 
 /// 解析含進位／底線的整數，並在轉成 i32 前檢查範圍與後綴。

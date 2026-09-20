@@ -137,9 +137,9 @@ fn rejects_semantic_errors() {
     }
 }
 
-/// v0.4.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+/// v0.6.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_5() {
+fn rejects_features_outside_v0_6() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -153,7 +153,6 @@ fn rejects_features_outside_v0_5() {
         "fn main() { let x = 1.0f32; }",
         "fn main() { let x = 'a'; }",
         r#"fn main() { let x = "text"; }"#,
-        "fn main() { let x = [1, 2]; }",
         "fn main() { let x = 1 << 2; }",
         "fn main() { let x = 1 & 2; }",
         "fn main() { let x = 1 | 2; }",
@@ -164,7 +163,6 @@ fn rejects_features_outside_v0_5() {
         "fn main() { let mut x = 1; let y = (x = 2); }",
         "fn main() { let mut x = 1; x |= 2; }",
         "fn main() { let mut x = 1; x <<= 2; }",
-        "fn main() { let mut x = [1]; x[0] = 2; }",
         "fn main() { let x = 1; x }",
         "fn main() { { 1 } }",
         "fn main() { 'label: {} }",
@@ -454,6 +452,71 @@ fn rejects_unsupported_floating_point_forms() {
         "fn main() { println!(\"{:.}\", 1.0); }",
         "fn main() { println!(\"{:.2e}\", 1.0); }",
         "fn main() { println!(\"{:.precision$}\", 1.0); }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Unsupported(_))),
+            "{source}: {result:?}"
+        );
+    }
+}
+
+/// v0.6.0 接受一維固定陣列、值複製、usize 索引與 len()。
+#[test]
+fn accepts_fixed_arrays_and_usize_indices() {
+    for source in [
+        include_str!("../examples/arrays.rs"),
+        "fn main() { let a = [1, 2, 3]; let b = a; println!(\"{} {}\", b[0], b.len()); }",
+        "fn main() { let a: [bool; 0] = []; let b = [true; 3]; println!(\"{} {}\", a.len(), b[2]); }",
+        "fn main() { let a = [1usize, 2, 3]; let b = [1, 2usize, 3]; println!(\"{} {}\", a[1], b[2]); }",
+        "fn main() { let mut a: [f64; 2] = [1.5, 2.5]; a[0] *= 2.0; a = [3.0; 2]; }",
+        "fn main() { let mut a = [1, 2]; a[0] = 3; a[1] += 4; a = [5, 6]; }",
+        "fn main() { println!(\"{}\", at(2)); } fn at(index: usize) -> usize { let a = [3usize; 4]; a[index] }",
+        "fn main() { let mut n: usize = 1; n += 2; n *= 3; n -= 1; n /= 2; n %= 3; println!(\"{}\", n); }",
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn rejects_array_semantic_errors() {
+    for (source, diagnostic) in [
+        ("fn main() { let a: [i32; 2] = [1, 2, 3]; }", "長度"),
+        ("fn main() { let a = [1, true]; }", "型別不符"),
+        (
+            "fn main() { let a = [1]; let i: i32 = 0; let x = a[i]; }",
+            "型別不符",
+        ),
+        ("fn main() { let a = [1]; let x = a[true]; }", "型別不符"),
+        ("fn main() { let a = [1]; a[0] = 2; }", "不可變"),
+        ("fn main() { let mut a = [1]; a[0] = true; }", "型別不符"),
+        ("fn main() { let mut a = [1]; a = [1, 2]; }", "長度"),
+        ("fn main() { let a = 1; let x = a[0]; }", "只能索引"),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(
+            matches!(error, TranspileError::Semantic(_)),
+            "{source}: {error}"
+        );
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
+#[test]
+fn rejects_array_forms_outside_v0_6() {
+    for source in [
+        "fn main() { let a = [[1, 2], [3, 4]]; }",
+        "fn main() { let a: [i32; 1 + 1] = [1, 2]; }",
+        "fn main() { let a = [0; 4097]; }",
+        "fn main() { let a = []; }",
+        "fn main() { let a = [1]; println!(\"{}\", a); }",
+        "fn main() { let a = [1]; let x = a.first(); }",
+        "fn main() { let a = [1]; let x = a.len(1); }",
+        "fn main() { let x = [1, 2][0]; }",
+        "fn main() { take([1]); } fn take(a: [i32; 1]) {}",
+        "fn main() {} fn make() -> [i32; 1] { [1] }",
+        "fn main() { let a = [1]; let same = a == a; }",
     ] {
         let result = transpile(source);
         assert!(

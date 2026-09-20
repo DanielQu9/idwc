@@ -19,13 +19,35 @@ pub(crate) struct Parameter {
     pub(crate) mutable: bool,
 }
 
-/// 此版本支援的值型別；所有整數皆固定為 i32。
+/// 此版本支援的 scalar、索引用 usize 與一維固定陣列型別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Type {
     I32,
+    Usize,
     F64,
     Bool,
     Unit,
+    Array(ArrayElement, usize),
+}
+
+/// 固定陣列允許的元素型別；不包含巢狀陣列或 unit。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArrayElement {
+    I32,
+    Usize,
+    F64,
+    Bool,
+}
+
+impl ArrayElement {
+    pub(crate) fn ty(self) -> Type {
+        match self {
+            Self::I32 => Type::I32,
+            Self::Usize => Type::Usize,
+            Self::F64 => Type::F64,
+            Self::Bool => Type::Bool,
+        }
+    }
 }
 
 /// 已解析 binding 與型別的敘述；binding id 在所屬函式內唯一。
@@ -38,6 +60,13 @@ pub(crate) enum Statement {
     Assign {
         id: usize,
         value: Expression,
+    },
+    AssignIndex {
+        id: usize,
+        length: usize,
+        index: Expression,
+        value: Expression,
+        op: Option<BinaryOp>,
     },
     Block(Vec<Statement>),
     /// 所有分支均為 unit 敘述；else if 表示為 else 分支中的 If。
@@ -80,9 +109,18 @@ pub(crate) struct Expression {
 /// 值運算式；呼叫與輸入可能有副作用，必須依序求值。
 pub(crate) enum ExpressionKind {
     Integer(i32),
+    Usize(usize),
     Float(f64),
     Boolean(bool),
     Variable(usize),
+    Array(Vec<Expression>),
+    ArrayRepeat(Box<Expression>, usize),
+    Index {
+        id: usize,
+        length: usize,
+        index: Box<Expression>,
+    },
+    ArrayLength(usize),
     Unit,
     Call(usize, Vec<Expression>),
     ReadI32,

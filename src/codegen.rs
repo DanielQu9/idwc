@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    BinaryOp, Expression, ExpressionKind, Function, PrintPart, Program, Statement, Type, UnaryOp,
+    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, PrintPart, Program, Statement,
+    Type, UnaryOp,
 };
 
 /// 從已驗證 IR 生成僅依賴 C 標準函式庫的 C17 原始碼。
@@ -14,6 +15,7 @@ pub(crate) fn generate(program: &Program) -> String {
         helpers: BTreeSet::new(),
         in_main: false,
         floating: false,
+        target_usize: false,
     };
     let mut prototypes = String::new();
     let mut functions = String::new();
@@ -24,6 +26,11 @@ pub(crate) fn generate(program: &Program) -> String {
                 .parameters
                 .iter()
                 .any(|parameter| parameter.ty == Type::F64);
+        generator.target_usize |= function.return_type == Type::Usize
+            || function
+                .parameters
+                .iter()
+                .any(|parameter| parameter.ty == Type::Usize);
         let signature = function_signature(function);
         prototypes.push_str(&format!("{signature};\n"));
         functions.push_str(&format!("{signature} {{\n"));
@@ -56,6 +63,12 @@ pub(crate) fn generate(program: &Program) -> String {
     if generator.floating {
         output.push_str("#include <float.h>\n#include <math.h>\n#include <fenv.h>\n#include <locale.h>\n#include <string.h>\n");
     }
+    if generator.target_usize {
+        output.push_str(&format!(
+            "_Static_assert(SIZE_MAX == UINT{}_MAX, \"idwc usize requires matching Rust and C target widths\");\n",
+            usize::BITS
+        ));
+    }
     output.push('\n');
     output.push_str(&runtime_helpers(&generator.helpers));
     if !prototypes.is_empty() {
@@ -81,6 +94,7 @@ struct Generator {
     helpers: BTreeSet<&'static str>,
     in_main: bool,
     floating: bool,
+    target_usize: bool,
 }
 
 impl Generator {
@@ -103,6 +117,10 @@ impl Generator {
         for statement in statements {
             match statement {
                 Statement::Let { id, mutable, value } => {
+                    if matches!(value.ty, Type::Array(_, _)) {
+                        self.array_let(*id, *mutable, value);
+                        continue;
+                    }
                     let initializer = self.expression(value);
                     let qualifier = if *mutable { "" } else { "const " };
                     self.line(&format!(
@@ -113,8 +131,29 @@ impl Generator {
                     self.line(&format!("(void)idwc_v{id};"));
                 }
                 Statement::Assign { id, value } => {
+                    if matches!(value.ty, Type::Array(_, _)) {
+                        self.array_assign(*id, value);
+                        continue;
+                    }
                     let value = self.expression(value);
                     self.line(&format!("idwc_v{id} = {value};"));
+                }
+                Statement::AssignIndex {
+                    id,
+                    length,
+                    index,
+                    value,
+                    op,
+                } => {
+                    // Rust assignment evaluates the right-hand side before the place expression.
+                    let right = self.expression(value);
+                    let index = self.checked_index(index, *length);
+                    let result = if let Some(op) = op {
+                        self.binary_value(*op, value.ty, &format!("idwc_v{id}[{index}]"), &right)
+                    } else {
+                        right
+                    };
+                    self.line(&format!("idwc_v{id}[{index}] = {result};"));
                 }
                 Statement::Block(statements) => {
                     self.line("{");
@@ -180,6 +219,10 @@ impl Generator {
                     self.line(if self.in_main { "return 0;" } else { "return;" });
                 }
                 Statement::Evaluate(expression) => {
+                    if matches!(expression.ty, Type::Array(_, _)) {
+                        let _ = self.array_values(expression);
+                        continue;
+                    }
                     let value = self.expression(expression);
                     self.line(&format!("(void)({value});"));
                 }
@@ -218,6 +261,7 @@ impl Generator {
                 }
                 PrintPart::Argument { index, precision } => match arguments[*index].ty {
                     Type::I32 => self.line(&format!("printf(\"%\" PRId32, {});", values[*index])),
+                    Type::Usize => self.line(&format!("printf(\"%zu\", {});", values[*index])),
                     Type::Bool => self.line(&format!(
                         "fputs({} ? \"true\" : \"false\", stdout);",
                         values[*index]
@@ -230,7 +274,9 @@ impl Generator {
                             precision.map_or(-1, i32::from)
                         ));
                     }
-                    Type::Unit => unreachable!("格式參數已驗證為 i32 或 bool"),
+                    Type::Unit | Type::Array(_, _) => {
+                        unreachable!("格式參數已驗證為 scalar")
+                    }
                 },
                 _ => {}
             }
@@ -244,6 +290,7 @@ impl Generator {
     fn expression(&mut self, expression: &Expression) -> String {
         self.typed = true;
         self.floating |= expression.ty == Type::F64;
+        self.target_usize |= matches!(expression.ty, Type::Usize | Type::Array(_, _));
         let value = match &expression.kind {
             ExpressionKind::Unit => return "0".into(),
             ExpressionKind::ReadI32 => {
@@ -295,8 +342,19 @@ impl Generator {
                     format!("INT32_C({value})")
                 };
             }
+            ExpressionKind::Usize(value) => return format!("((size_t)UINT64_C({value}))"),
             ExpressionKind::Boolean(value) => return value.to_string(),
             ExpressionKind::Variable(id) => return format!("idwc_v{id}"),
+            ExpressionKind::Index { id, length, index } => {
+                let index = self.checked_index(index, *length);
+                return format!("idwc_v{id}[{index}]");
+            }
+            ExpressionKind::ArrayLength(length) => {
+                return format!("((size_t)UINT64_C({length}))");
+            }
+            ExpressionKind::Array(_) | ExpressionKind::ArrayRepeat(_, _) => {
+                unreachable!("陣列值只由陣列敘述降低")
+            }
             ExpressionKind::Unary(op, operand) => {
                 let operand = self.expression(operand);
                 match op {
@@ -312,6 +370,7 @@ impl Generator {
                 }
             }
             ExpressionKind::Binary(op, left, right) => {
+                let operand_type = left.ty;
                 let left = self.expression(left);
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
                     // 右 operand 的算術檢查也必須放在短路分支內。
@@ -331,48 +390,7 @@ impl Generator {
                     return temp;
                 }
                 let right = self.expression(right);
-                if expression.ty == Type::F64 {
-                    let operator = match op {
-                        BinaryOp::Add => "+",
-                        BinaryOp::Subtract => "-",
-                        BinaryOp::Multiply => "*",
-                        BinaryOp::Divide => {
-                            self.helpers.insert("float_div");
-                            return self.float_temp(&format!("idwc_fdiv({left}, {right})"));
-                        }
-                        _ => unreachable!("浮點餘數已拒絕"),
-                    };
-                    return self.float_temp(&format!("({left} {operator} {right})"));
-                }
-                match op {
-                    BinaryOp::Add
-                    | BinaryOp::Subtract
-                    | BinaryOp::Multiply
-                    | BinaryOp::Divide
-                    | BinaryOp::Remainder => {
-                        let helper = match op {
-                            BinaryOp::Add => "add",
-                            BinaryOp::Subtract => "sub",
-                            BinaryOp::Multiply => "mul",
-                            BinaryOp::Divide => "div",
-                            _ => "rem",
-                        };
-                        self.helpers.insert(helper);
-                        format!("idwc_{helper}({left}, {right})")
-                    }
-                    _ => {
-                        let operator = match op {
-                            BinaryOp::Equal => "==",
-                            BinaryOp::NotEqual => "!=",
-                            BinaryOp::Less => "<",
-                            BinaryOp::LessEqual => "<=",
-                            BinaryOp::Greater => ">",
-                            BinaryOp::GreaterEqual => ">=",
-                            _ => unreachable!("短路運算已在前面處理"),
-                        };
-                        format!("({left} {operator} {right})")
-                    }
-                }
+                self.binary_value(*op, operand_type, &left, &right)
             }
         };
         let temp = self.temp_name();
@@ -394,16 +412,165 @@ impl Generator {
         self.line(&format!("const volatile double {temp} = {value};"));
         temp
     }
+
+    fn checked_index(&mut self, index: &Expression, length: usize) -> String {
+        let value = self.expression(index);
+        let temp = self.temp_name();
+        self.line(&format!("const size_t {temp} = {value};"));
+        self.helpers.insert("bounds");
+        self.line(&format!(
+            "if ({temp} >= ((size_t)UINT64_C({length}))) {{ idwc_fail(\"idwc: array index out of bounds\\n\"); }}"
+        ));
+        temp
+    }
+
+    fn array_let(&mut self, id: usize, mutable: bool, value: &Expression) {
+        let Type::Array(element, length) = value.ty else {
+            unreachable!("array_let 僅接受陣列")
+        };
+        self.typed = true;
+        self.floating |= element == ArrayElement::F64;
+        self.target_usize = true;
+        let values = self.array_values(value);
+        let qualifier = if mutable { "" } else { "const " };
+        let physical_length = length.max(1);
+        let initializer = if values.is_empty() {
+            "0".into()
+        } else {
+            values.join(", ")
+        };
+        self.line(&format!(
+            "{qualifier}{} idwc_v{id}[{physical_length}] = {{{initializer}}};",
+            c_element_type(element)
+        ));
+        self.line(&format!("(void)idwc_v{id};"));
+    }
+
+    fn array_assign(&mut self, id: usize, value: &Expression) {
+        let Type::Array(element, length) = value.ty else {
+            unreachable!("array_assign 僅接受陣列")
+        };
+        self.typed = true;
+        self.floating |= element == ArrayElement::F64;
+        self.target_usize = true;
+        let values = self.array_values(value);
+        for (index, value) in values.iter().take(length).enumerate() {
+            self.line(&format!("idwc_v{id}[{index}] = {value};"));
+        }
+    }
+
+    fn array_values(&mut self, value: &Expression) -> Vec<String> {
+        let Type::Array(_, length) = value.ty else {
+            unreachable!("array_values 僅接受陣列")
+        };
+        match &value.kind {
+            ExpressionKind::Array(values) => {
+                values.iter().map(|value| self.snapshot(value)).collect()
+            }
+            ExpressionKind::ArrayRepeat(value, repeat_length) => {
+                debug_assert_eq!(length, *repeat_length);
+                let value = self.snapshot(value);
+                vec![value; length]
+            }
+            ExpressionKind::Variable(id) => (0..length)
+                .map(|index| format!("idwc_v{id}[{index}]"))
+                .collect(),
+            _ => unreachable!("陣列值僅能來自字面量、重複初始化或陣列 binding"),
+        }
+    }
+
+    fn snapshot(&mut self, expression: &Expression) -> String {
+        let value = self.expression(expression);
+        let temp = self.temp_name();
+        let qualifier = if expression.ty == Type::F64 {
+            "const volatile"
+        } else {
+            "const"
+        };
+        self.line(&format!(
+            "{qualifier} {} {temp} = {value};",
+            c_type(expression.ty)
+        ));
+        temp
+    }
+
+    fn binary_value(&mut self, op: BinaryOp, ty: Type, left: &str, right: &str) -> String {
+        if ty == Type::F64
+            && matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide
+            )
+        {
+            if matches!(op, BinaryOp::Divide) {
+                self.helpers.insert("float_div");
+                return self.float_temp(&format!("idwc_fdiv({left}, {right})"));
+            }
+            let operator = match op {
+                BinaryOp::Add => "+",
+                BinaryOp::Subtract => "-",
+                BinaryOp::Multiply => "*",
+                _ => unreachable!(),
+            };
+            return self.float_temp(&format!("({left} {operator} {right})"));
+        }
+        if matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Remainder
+        ) {
+            let helper = match op {
+                BinaryOp::Add => "add",
+                BinaryOp::Subtract => "sub",
+                BinaryOp::Multiply => "mul",
+                BinaryOp::Divide => "div",
+                BinaryOp::Remainder => "rem",
+                _ => unreachable!(),
+            };
+            let helper = if ty == Type::Usize {
+                match helper {
+                    "add" => "uadd",
+                    "sub" => "usub",
+                    "mul" => "umul",
+                    "div" => "udiv",
+                    "rem" => "urem",
+                    _ => unreachable!(),
+                }
+            } else {
+                helper
+            };
+            self.helpers.insert(helper);
+            return format!("idwc_{helper}({left}, {right})");
+        }
+        let operator = match op {
+            BinaryOp::Equal => "==",
+            BinaryOp::NotEqual => "!=",
+            BinaryOp::Less => "<",
+            BinaryOp::LessEqual => "<=",
+            BinaryOp::Greater => ">",
+            BinaryOp::GreaterEqual => ">=",
+            _ => unreachable!("短路運算已在前面處理"),
+        };
+        format!("({left} {operator} {right})")
+    }
 }
 
 /// 將 IR 的確定型別映射到 C 標準型別。
 fn c_type(ty: Type) -> &'static str {
     match ty {
         Type::I32 => "int32_t",
+        Type::Usize => "size_t",
         Type::F64 => "double",
         Type::Bool => "bool",
         Type::Unit => "void",
+        Type::Array(_, _) => unreachable!("C scalar 型別不接受陣列"),
     }
+}
+
+fn c_element_type(element: ArrayElement) -> &'static str {
+    c_type(element.ty())
 }
 
 fn function_signature(function: &Function) -> String {
@@ -448,7 +615,7 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     }
     for helper in helpers {
         match *helper {
-            "token" => {}
+            "token" | "bounds" => {}
             "float" => output.push_str(include_str!("runtime/float.c")),
             "float_print" => output.push_str(include_str!("runtime/float_print.c")),
             "float_read" => output.push_str(include_str!("runtime/float_read.c")),
@@ -464,6 +631,21 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
                 let operator = if *helper == "div" { "/" } else { "%" };
                 output.push_str(&format!(
                     "static int32_t idwc_{helper}(int32_t a, int32_t b) {{\n    if (b == 0) {{\n        idwc_fail(\"idwc: division by zero\\n\");\n    }}\n    if (a == INT32_MIN && b == -1) {{\n        idwc_fail(\"idwc: integer overflow\\n\");\n    }}\n    return a {operator} b;\n}}\n\n"
+                ));
+            }
+            "uadd" => output.push_str(
+                "static size_t idwc_uadd(size_t a, size_t b) {\n    if (a > SIZE_MAX - b) { idwc_fail(\"idwc: integer overflow\\n\"); }\n    return a + b;\n}\n\n",
+            ),
+            "usub" => output.push_str(
+                "static size_t idwc_usub(size_t a, size_t b) {\n    if (a < b) { idwc_fail(\"idwc: integer overflow\\n\"); }\n    return a - b;\n}\n\n",
+            ),
+            "umul" => output.push_str(
+                "static size_t idwc_umul(size_t a, size_t b) {\n    if (b != 0 && a > SIZE_MAX / b) { idwc_fail(\"idwc: integer overflow\\n\"); }\n    return a * b;\n}\n\n",
+            ),
+            "udiv" | "urem" => {
+                let operator = if *helper == "udiv" { "/" } else { "%" };
+                output.push_str(&format!(
+                    "static size_t idwc_{helper}(size_t a, size_t b) {{\n    if (b == 0) {{ idwc_fail(\"idwc: division by zero\\n\"); }}\n    return a {operator} b;\n}}\n\n"
                 ));
             }
             _ => {
