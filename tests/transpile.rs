@@ -137,9 +137,9 @@ fn rejects_semantic_errors() {
     }
 }
 
-/// v0.6.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
+/// v0.7.0 不擴張成完整 Rust，未實作的型別與運算式仍應拒絕。
 #[test]
-fn rejects_features_outside_v0_6() {
+fn rejects_features_outside_v0_7() {
     for source in [
         "fn main() { let x; }",
         "fn main() { let x: i32; }",
@@ -447,7 +447,6 @@ fn rejects_unsupported_floating_point_forms() {
         "fn main() { let x = 1.0 % 2.0; }",
         "fn main() { let mut x = 1.0; x %= 2.0; }",
         "fn main() { let x = 1 as f64; }",
-        "fn main() { let x = 1.0.powi(2); }",
         "fn main() { println!(\"{:.19}\", 1.0); }",
         "fn main() { println!(\"{:.}\", 1.0); }",
         "fn main() { println!(\"{:.2e}\", 1.0); }",
@@ -517,6 +516,77 @@ fn rejects_array_forms_outside_v0_6() {
         "fn main() { take([1]); } fn take(a: [i32; 1]) {}",
         "fn main() {} fn make() -> [i32; 1] { [1] }",
         "fn main() { let a = [1]; let same = a == a; }",
+    ] {
+        let result = transpile(source);
+        assert!(
+            matches!(result, Err(TranspileError::Unsupported(_))),
+            "{source}: {result:?}"
+        );
+    }
+}
+
+/// v0.7.0 僅接受明確列出的 String／token 解析流程與 powi(2)。
+#[test]
+fn accepts_limited_line_input_and_math() {
+    for source in [
+        include_str!("../examples/line_input.rs"),
+        "fn main() { let mut s: String = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let n: i32 = s.trim().parse::<i32>().unwrap(); println!(\"{}\", n); }",
+        "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let t = s.trim().split_whitespace().collect::<Vec<&str>>(); let n = t[0].parse::<i32>().unwrap(); println!(\"{} {}\", n, t.len()); }",
+        "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); { let t: Vec<&str> = s.split_whitespace().collect(); let n = t[0].parse::<f64>().unwrap(); println!(\"{}\", n); } std::io::stdin().read_line(&mut s).unwrap(); }",
+        "fn main() { let x = 3.0; println!(\"{}\", x.powi(2)); }",
+        "fn main() { println!(\"{}\", idwc::io::read_f64().powi(2i32)); }",
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn rejects_line_input_semantic_errors() {
+    for (source, diagnostic) in [
+        (
+            "fn main() { let s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); }",
+            "可變",
+        ),
+        (
+            "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let t: Vec<&str> = s.split_whitespace().collect(); std::io::stdin().read_line(&mut s).unwrap(); }",
+            "存活期間",
+        ),
+        (
+            "fn main() { let s = String::new(); let t: Vec<&str> = s.split_whitespace().collect(); let n = t[false].parse::<i32>().unwrap(); }",
+            "型別不符",
+        ),
+        ("fn main() { let s = String::new(1); }", "不接受引數"),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(
+            matches!(error, TranspileError::Semantic(_)),
+            "{source}: {error}"
+        );
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
+#[test]
+fn rejects_string_vec_and_math_forms_outside_v0_7() {
+    for source in [
+        "fn main() { let s = String::from(\"x\"); }",
+        "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s); }",
+        "fn main() { let mut s = String::new(); stdin().read_line(&mut s).unwrap(); }",
+        "fn main() { let mut s = String::new(); std::io::stdin().read_line(s).unwrap(); }",
+        "fn main() { let s = String::new(); let other = s; }",
+        "fn main() { let mut s = String::new(); s = String::new(); }",
+        "fn main() { let s = String::new(); let t = s.split_whitespace().collect(); }",
+        "fn main() { let s = String::new(); let t: Vec<i32> = s.split_whitespace().collect(); }",
+        "fn main() { let s = String::new(); let t: Vec<&str> = s.split_whitespace(); }",
+        "fn main() { let s = String::new(); let n = s.parse::<i32>().unwrap(); }",
+        "fn main() { let s = String::new(); let n = s.trim().parse::<usize>().unwrap(); }",
+        "fn main() { let s = String::new(); let n = s.trim().parse().unwrap(); }",
+        "fn main() { let x = 2.0.powi(3); }",
+        "fn main() { let x = 2.0.powi(-2); }",
+        "fn main() { let x = 2.0.sqrt(); }",
+        "fn main() {} fn take(s: String) {}",
+        "fn main() {} fn make() -> String { String::new() }",
     ] {
         let result = transpile(source);
         assert!(

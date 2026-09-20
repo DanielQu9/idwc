@@ -65,7 +65,7 @@ translation capabilities below distinguish completed work from planned features.
 
 ### Milestones
 
-The current version is **v0.6.0**.
+The current version is **v0.7.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ The current version is **v0.6.0**.
 | v0.4.0 | Functions, basic output, and limited typed stdin | Completed (within the subset below) |
 | v0.5.0 | f64 types, basic floating-point operations, and input/output | Completed (within the subset below) |
 | v0.6.0 | Fixed-size arrays, indexing, and bounds checks | Completed (within the subset below) |
-| v0.7.0 | Line input, string splitting/parsing, and limited math functions | Planned |
+| v0.7.0 | Line input, string splitting/parsing, and limited math functions | Completed (within the subset below) |
 | v1.0.0 | Stable Rust subset, tests, and documentation | Planned |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C output | Planned |
 
@@ -141,10 +141,11 @@ rules below; integer failure rules do not apply. Fast-math is rejected.
 Tests compare promised formats exactly and use explicit absolute/relative
 tolerances for finite numerical results, including boundary and special cases.
 
-**v0.7.0** adds `parse::<f64>()` and limited `powi(2)` alongside line input for
-BMI-style exercises. Math functions require their own precision and
-special-value rules before acceptance. `f32` and additional math functions are
-deferred to later work. These additional features remain **planned**.
+**v0.7.0** adds `parse::<f64>()` and exactly `powi(2)` alongside line input for
+BMI-style exercises. `powi(2)` evaluates its receiver once and lowers to one
+binary64 multiplication, retaining the existing rounding, signed-zero, NaN,
+infinity, overflow, and underflow rules. Other exponents, `f32`, and additional
+math methods remain unsupported.
 
 #### Stdin support and next stages
 
@@ -158,19 +159,22 @@ failure behavior. Tests feed identical stdin to trusted Rust and C programs.
 
 **v0.5.0** extends typed input to `f64`, as specified above.
 
-**v0.7.0** builds on v0.5.0 floating-point support and v0.6.0 array/index bounds
-checks to support limited patterns using
-`String::new()`, `stdin().read_line(&mut buffer)`, `trim()`, `split_whitespace()`,
-token collection (including the `Vec<&str>` pattern), and `parse::<i32>()` /
-`parse::<f64>()`. It also adds limited `powi(2)` for BMI-style exercises using
-the existing floating-point rules. Buffer allocation and cleanup,
-read_line append/newline behavior, UTF-8, length limits, token lifetimes,
-index bounds, EOF, parse failures, and floating-point differences must be
-specified and tested. Accepted input/parse `.unwrap()` patterns must fail in a
-controlled way. These goals do not imply general support for `String`, `Vec`,
-iterators, generics, or borrowing.
+**v0.7.0** supports the exact line-input pattern
+`std::io::stdin().read_line(&mut buffer).unwrap()` with a mutable local created
+by `String::new()`. It also accepts `input.trim().parse::<T>().unwrap()`, plus
+`input.split_whitespace().collect()` or
+`input.trim().split_whitespace().collect()` when the result is inferred or
+annotated as `Vec<&str>`. The collected tokens support
+`tokens[index].parse::<T>().unwrap()` for `T = i32` or `f64`, and `.len()`.
 
-Line/string input remains **planned**.
+Generated C stores each limited String in a 4096-byte stack buffer and each
+collection in 256 stack-allocated byte spans, so no heap allocation or cleanup
+is needed. `read_line` appends through the newline, returns successfully on EOF
+with no bytes, and validates UTF-8. Splitting and trimming use Rust-compatible
+Unicode whitespace. Tokens borrow their source buffer; IdwC conservatively
+rejects another `read_line` while a collection remains in lexical scope.
+Complete limits and controlled failures are documented below. This support does
+not imply general String, Vec, iterator, generic, slice, or borrowing support.
 
 #### Fixed-size array support (v0.6.0)
 
@@ -193,7 +197,7 @@ Nested arrays, array function parameters/returns, slices, references, iterator
 methods, array equality, and indexing temporary array expressions remain
 unsupported. Indexing is currently limited to a named local array binding.
 
-### Current release: v0.6.0
+### Current release: v0.7.0
 
 Requires Rust 1.88 or newer (edition 2024) to build the transpiler, and Clang or GCC
 to compile the generated C17 program.
@@ -250,8 +254,8 @@ printf '70 1.75\n' | cargo run --example floating_point
 ```
 
 Link floating-point C programs with `-lm` (required on some platforms).
-This example uses no String, Vec, casts, or `powi`; those input patterns remain
-outside this release's subset.
+This example uses the earlier typed-token input API; the v0.7.0 line-input form
+is demonstrated separately below.
 
 The arrays example exercises value copying, `.len()`, `usize` indexing,
 mutation, and bounds-checked element access:
@@ -261,6 +265,16 @@ cargo run -- examples/arrays.rs -o /tmp/idwc-arrays.c
 clang -std=c17 /tmp/idwc-arrays.c -o /tmp/idwc-arrays
 /tmp/idwc-arrays
 # first = 13, last = 16, original first = 12, length = 4
+```
+
+The line-input example uses the limited String/token pipeline and `powi(2)`:
+
+```bash
+cargo run -- examples/line_input.rs -o /tmp/idwc-line-input.c
+clang -std=c17 /tmp/idwc-line-input.c -lm -o /tmp/idwc-line-input
+printf '70 1.75\n' | /tmp/idwc-line-input
+# Enter weight (kg) and height (m): BMI = 22.86, below 25 = true
+printf '70 1.75\n' | cargo run --example line_input
 ```
 
 To use the `idwc` executable directly, run `cargo build` and then
@@ -308,6 +322,8 @@ fn main() {
   suffix and underscores (including `1f64`). Nondecimal floating literals and
   `f32` are rejected. Infinite literals are translation errors; tiny literals
   round to representable subnormals or zero.
+- The `f64` method `powi(2)` only. Its receiver is evaluated once and squared
+  with one binary64 multiplication; other exponents and math methods are rejected.
 - Boolean `!`, `&&`, and `||`, with short-circuit evaluation.
 - Plain assignment and arithmetic compound assignment (`+=`, `-=`, `*=`, `/=`,
   `%=`) to mutable bindings; `%=` is integer-only. Assignment is a statement,
@@ -316,6 +332,12 @@ fn main() {
   literals, repeat initialization, value copies, whole-array assignment,
   `.len()`, and `usize` element reads/writes. Lengths are literal values no
   greater than 4096. Every access performs a runtime bounds check.
+- Limited local `String` and `Vec<&str>` bindings for the exact
+  `String::new()` → `std::io::stdin().read_line(&mut input).unwrap()` →
+  `trim()` / `split_whitespace().collect()` → indexed
+  `parse::<i32|f64>().unwrap()` pipeline. Token collections also support
+  `.len()`. String/Vec assignment, function parameters/returns, and general
+  methods remain unsupported.
 - Multiple statements, nested statement blocks, same-scope and nested shadowing,
   and optional empty main. Value-returning blocks are not supported.
 - Statement-form `if` / `else if` / `else` with `bool` conditions and
@@ -357,10 +379,9 @@ Value-producing control-flow expressions, `break` with a value, loop labels,
 `if let`, `while let`, and `match` are not supported. Integer-range `for`, nested
 arrays, slices, and integer types other than `i32` / restricted `usize` remain
 planned. Array parameters/returns and indexing non-binding expressions are
-rejected. `f32`, numeric casts,
-floating remainder, associated constant paths (such as `f64::NAN`), and math
-methods such as `powi` are rejected. Line/string input is targeted for v0.7.0
-as described above.
+rejected. `f32`, numeric casts, floating remainder, associated constant paths
+(such as `f64::NAN`), math methods other than `powi(2)`, and general String/Vec
+operations are rejected.
 Async, unsafe code, raw
 pointers, generics/traits, closures, iterator chains, arbitrary macros, full
 `std`, complex ownership/borrowing, and Cargo dependencies in input programs
@@ -414,6 +435,48 @@ failure paths ignore that signal so a closed output pipe permits a controlled
 diagnostic. Other output errors retain the limitation
 described above. Native Rust examples link this crate through Cargo; no extra
 crate or Rust library is needed to compile the generated C.
+
+#### Limited line-input contract
+
+The v0.7.0 line-input path accepts only local buffers created by
+`String::new()` and the exact
+`std::io::stdin().read_line(&mut input).unwrap()` call. Each generated C buffer
+has 4096 bytes of stack storage. A read appends bytes to existing content,
+retains the newline when present, and succeeds without changing the buffer when
+EOF occurs before any byte. The 4096-byte limit applies to total accumulated
+content across repeated reads. Valid UTF-8 is required after every read.
+
+`trim()` and `split_whitespace()` use the Unicode White_Space property used by
+Rust, including non-ASCII separators. A collected `Vec<&str>` is represented by
+at most 256 byte spans that borrow the source buffer; it does not allocate or
+copy token text. No heap cleanup is required. To keep those spans valid without
+implementing Rust's full borrow checker, another `read_line` is rejected while
+a token collection from that String remains in lexical scope.
+
+`parse::<i32>()` accepts `[+-]?[0-9]+` and checks the complete i32 range.
+`parse::<f64>()` accepts the same decimal/scientific grammar and special values
+as the typed float reader, but follows Rust string parsing for range results:
+overflow becomes signed infinity and nonzero underflow may become signed zero.
+This differs intentionally from `idwc::io::read_f64()`, whose input contract
+reports those two cases as range errors. Parsing can consume either
+`input.trim()` or `tokens[index]`; token indices are evaluated once and checked
+before accessing a span.
+
+All line-input runtime failures flush stdout, write one diagnostic to stderr,
+and exit with status 101:
+
+| Condition | Diagnostic |
+| --- | --- |
+| stdin read error | `idwc: stdin I/O error` |
+| Invalid UTF-8 | `idwc: invalid UTF-8 input` |
+| Accumulated input exceeds 4096 bytes | `idwc: input line buffer too long` |
+| More than 256 split tokens | `idwc: too many input tokens` |
+| Token index outside the collection | `idwc: token index out of bounds` |
+| Invalid integer / integer outside i32 | `idwc: invalid integer` / `idwc: integer out of range` |
+| Invalid floating-point token | `idwc: invalid float` |
+
+The accepted `.unwrap()` forms therefore fail in a controlled way without C
+undefined behavior. IdwC does not reproduce Rust panic text or unwinding.
 
 #### Integer semantics
 
@@ -490,8 +553,11 @@ evaluation behavior. `loop` uses a C `for (;;)` without a condition check.
 Function prototypes precede definitions; call arguments are saved into ordered
 temporaries. `src/io.rs` implements the native Rust typed-input/flush interface,
 mirrored by bounded C runtime helpers. `src/runtime/*.c` contains float
-environment, exact decimal formatting, and shared token-reading helper sources
-embedded only when needed. The generated C remains a single standalone file.
+environment, exact decimal formatting, shared token-reading helpers, and the
+bounded UTF-8 line/token-span runtime, embedded only when needed. String and
+token operations are lowered to dedicated IR nodes rather than general-purpose
+ownership, iterator, or generic machinery. The generated C remains a single
+standalone file.
 `src/main.rs` handles arguments and file I/O. Input programs and custom macros
 are never run during translation. The only direct dependency remains `syn`.
 
@@ -511,6 +577,9 @@ floating-point type errors, arithmetic, special values, rounding midpoints,
 subnormal/large-value formatting, and float token range validation,
 fixed-array initialization/copy/mutation, `usize`, index evaluation order, and
 bounds failures under UndefinedBehaviorSanitizer,
+line append/EOF behavior, Unicode whitespace, invalid UTF-8, buffer/token
+limits, token bounds and lifetime rejection, i32/f64 string parsing, and
+`powi(2)` including special/range values,
 CLI success/error paths,
 and compilation of trusted fixtures with both Rust and C17. Runtime comparisons
 check output bytes and exit status. End-to-end tests require `rustc` and Clang

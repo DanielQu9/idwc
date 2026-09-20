@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, PrintPart, Program, Statement,
-    Type, UnaryOp,
+    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, ParseSource, PrintPart, Program,
+    Statement, Type, UnaryOp,
 };
 
 /// 從已驗證 IR 生成僅依賴 C 標準函式庫的 C17 原始碼。
@@ -274,7 +274,7 @@ impl Generator {
                             precision.map_or(-1, i32::from)
                         ));
                     }
-                    Type::Unit | Type::Array(_, _) => {
+                    Type::Unit | Type::Array(_, _) | Type::String | Type::Tokens => {
                         unreachable!("格式參數已驗證為 scalar")
                     }
                 },
@@ -351,6 +351,49 @@ impl Generator {
             }
             ExpressionKind::ArrayLength(length) => {
                 return format!("((size_t)UINT64_C({length}))");
+            }
+            ExpressionKind::StringNew => {
+                self.helpers.insert("line");
+                "((idwc_string){{0}, 0})".into()
+            }
+            ExpressionKind::ReadLine(id) => {
+                self.helpers.insert("line");
+                self.line(&format!("idwc_read_line(&idwc_v{id});"));
+                return "0".into();
+            }
+            ExpressionKind::SplitWhitespace(id) => {
+                self.helpers.insert("line");
+                format!("idwc_split_whitespace(&idwc_v{id})")
+            }
+            ExpressionKind::TokensLength(id) => return format!("idwc_v{id}.length"),
+            ExpressionKind::Parse { source } => {
+                self.helpers.insert("line");
+                let suffix = match expression.ty {
+                    Type::I32 => {
+                        self.helpers.insert("line_parse_i32");
+                        "i32"
+                    }
+                    Type::F64 => {
+                        self.helpers.insert("line_parse_f64");
+                        "f64"
+                    }
+                    _ => unreachable!("parse 目標已限制為 i32 或 f64"),
+                };
+                match source {
+                    ParseSource::TrimmedString(id) => {
+                        format!("idwc_parse_trimmed_{suffix}(&idwc_v{id})")
+                    }
+                    ParseSource::Token { id, index } => {
+                        let index = self.expression(index);
+                        let temp = self.temp_name();
+                        self.line(&format!("const size_t {temp} = {index};"));
+                        format!("idwc_parse_token_{suffix}(&idwc_v{id}, {temp})")
+                    }
+                }
+            }
+            ExpressionKind::Powi2(value) => {
+                let value = self.snapshot(value);
+                return self.float_temp(&format!("({value} * {value})"));
             }
             ExpressionKind::Array(_) | ExpressionKind::ArrayRepeat(_, _) => {
                 unreachable!("陣列值只由陣列敘述降低")
@@ -566,6 +609,8 @@ fn c_type(ty: Type) -> &'static str {
         Type::Bool => "bool",
         Type::Unit => "void",
         Type::Array(_, _) => unreachable!("C scalar 型別不接受陣列"),
+        Type::String => "idwc_string",
+        Type::Tokens => "idwc_tokens",
     }
 }
 
@@ -613,9 +658,14 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     if helpers.contains("token") {
         output.push_str(include_str!("runtime/token.c"));
     }
+    if helpers.contains("line") {
+        output.push_str(include_str!("runtime/line.c"));
+    }
     for helper in helpers {
         match *helper {
-            "token" | "bounds" => {}
+            "token" | "bounds" | "line" => {}
+            "line_parse_i32" => output.push_str(include_str!("runtime/line_parse_i32.c")),
+            "line_parse_f64" => output.push_str(include_str!("runtime/line_parse_f64.c")),
             "float" => output.push_str(include_str!("runtime/float.c")),
             "float_print" => output.push_str(include_str!("runtime/float_print.c")),
             "float_read" => output.push_str(include_str!("runtime/float_read.c")),

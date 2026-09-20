@@ -19,7 +19,7 @@ pub(crate) struct Parameter {
     pub(crate) mutable: bool,
 }
 
-/// 此版本支援的 scalar、索引用 usize 與一維固定陣列型別。
+/// 此版本支援的 scalar、一維固定陣列，以及限定的行輸入中介型別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Type {
     I32,
@@ -28,6 +28,8 @@ pub(crate) enum Type {
     Bool,
     Unit,
     Array(ArrayElement, usize),
+    String,
+    Tokens,
 }
 
 /// 固定陣列允許的元素型別；不包含巢狀陣列或 unit。
@@ -121,6 +123,14 @@ pub(crate) enum ExpressionKind {
         index: Box<Expression>,
     },
     ArrayLength(usize),
+    StringNew,
+    ReadLine(usize),
+    SplitWhitespace(usize),
+    TokensLength(usize),
+    Parse {
+        source: ParseSource,
+    },
+    Powi2(Box<Expression>),
     Unit,
     Call(usize, Vec<Expression>),
     ReadI32,
@@ -128,6 +138,12 @@ pub(crate) enum ExpressionKind {
     FlushStdout,
     Unary(UnaryOp, Box<Expression>),
     Binary(BinaryOp, Box<Expression>, Box<Expression>),
+}
+
+/// v0.7.0 限定解析來源；不向 IR 暴露一般 `&str` 或 iterator。
+pub(crate) enum ParseSource {
+    TrimmedString(usize),
+    Token { id: usize, index: Box<Expression> },
 }
 
 /// 一元算術負號與布林反轉。

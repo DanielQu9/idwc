@@ -381,6 +381,157 @@ fn array_bounds_fail_without_undefined_behavior() {
     }
 }
 
+/// 限定行輸入流程的 UTF-8、Unicode whitespace、附加、解析與 powi(2) 應符合 Rust。
+#[test]
+fn line_input_parsing_and_powi_match_rust() {
+    let cases = [
+        (
+            include_str!("../examples/line_input.rs"),
+            "70\u{2003}1.75\n",
+        ),
+        (
+            r#"fn main() {
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                let value = input.trim().parse::<i32>().unwrap();
+                println!("{}", value);
+            }"#,
+            "\u{00a0}-42\u{3000}\n",
+        ),
+        (
+            r#"fn main() {
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                std::io::stdin().read_line(&mut input).unwrap();
+                let values: Vec<&str> = input.split_whitespace().collect();
+                println!("{} {} {} {} {}", values.len(),
+                    values[0].parse::<i32>().unwrap(), values[1].parse::<i32>().unwrap(),
+                    values[2].parse::<i32>().unwrap(), values[3].parse::<i32>().unwrap());
+            }"#,
+            "1 2\n3 4\n",
+        ),
+        (
+            r#"fn main() {
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                let values = input.split_whitespace().collect::<Vec<&str>>();
+                println!("{}", values.len());
+            }"#,
+            "",
+        ),
+        (
+            r#"fn main() {
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                let values: Vec<&str> = input.split_whitespace().collect();
+                let a = values[0].parse::<f64>().unwrap();
+                let b = values[1].parse::<f64>().unwrap();
+                let c = values[2].parse::<f64>().unwrap();
+                let d = values[3].parse::<f64>().unwrap();
+                println!("{} {} {} {}", a.powi(2), b.powi(2), c.powi(2), d.powi(2));
+            }"#,
+            "-0 NaN 1e9999 1e-9999\n",
+        ),
+    ];
+    let dir = TestDir::new();
+    for (source, input) in cases {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, input.as_bytes());
+        let c = run_with_input(&c, input.as_bytes());
+        assert!(rust.status.success(), "{source}: {rust:?}");
+        assert_same_output(&rust, &c);
+    }
+}
+
+/// 行輸入的所有失敗路徑都必須在存取 C buffer 前受控結束。
+#[test]
+fn line_input_failures_are_controlled() {
+    let integer_source = r#"fn main() {
+        print!("input: "); idwc::io::flush_stdout();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let values: Vec<&str> = input.split_whitespace().collect();
+        println!("{}", values[1].parse::<i32>().unwrap());
+    }"#;
+    let float_source = r#"fn main() {
+        print!("input: "); idwc::io::flush_stdout();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let values: Vec<&str> = input.split_whitespace().collect();
+        println!("{}", values[0].parse::<f64>().unwrap());
+    }"#;
+    let dir = TestDir::new();
+    for (source, input, diagnostic) in [
+        (integer_source, b"1 x\n".as_slice(), "invalid integer"),
+        (
+            integer_source,
+            b"1 2147483648\n".as_slice(),
+            "integer out of range",
+        ),
+        (
+            integer_source,
+            b"1\n".as_slice(),
+            "token index out of bounds",
+        ),
+        (integer_source, b"1 2\0\n".as_slice(), "invalid integer"),
+        (float_source, b"1.2x\n".as_slice(), "invalid float"),
+    ] {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, input);
+        let c = run_with_input(&c, input);
+        assert_eq!(rust.status.code(), Some(101));
+        assert_eq!(c.status.code(), Some(101));
+        assert_eq!(c.stdout, rust.stdout);
+        assert_eq!(c.stderr, format!("idwc: {diagnostic}\n").as_bytes());
+    }
+
+    let read_source = r#"fn main() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        println!("read");
+    }"#;
+    let (rust, c) = compile_pair(&dir, read_source);
+    let rust_invalid_utf8 = run_with_input(&rust, b"\xff\n");
+    let invalid_utf8 = run_with_input(&c, b"\xff\n");
+    assert_eq!(rust_invalid_utf8.status.code(), Some(101));
+    assert_eq!(invalid_utf8.status.code(), Some(101));
+    assert_eq!(invalid_utf8.stdout, rust_invalid_utf8.stdout);
+    assert_eq!(invalid_utf8.stderr, b"idwc: invalid UTF-8 input\n");
+
+    let exact_limit = run_with_input(&c, &vec![b'a'; 4096]);
+    assert!(exact_limit.status.success());
+    assert_eq!(exact_limit.stdout, b"read\n");
+    let over_limit = run_with_input(&c, &vec![b'a'; 4097]);
+    assert_eq!(over_limit.status.code(), Some(101));
+    assert_eq!(over_limit.stderr, b"idwc: input line buffer too long\n");
+
+    let run_directory = |binary: &Path| {
+        run_with_timeout(Command::new(binary).stdin(Stdio::from(fs::File::open(&dir.0).unwrap())))
+    };
+    let rust_io_error = run_directory(&rust);
+    let c_io_error = run_directory(&c);
+    assert_eq!(rust_io_error.status.code(), Some(101));
+    assert_eq!(c_io_error.status.code(), Some(101));
+    assert_eq!(c_io_error.stdout, rust_io_error.stdout);
+    assert_eq!(c_io_error.stderr, b"idwc: stdin I/O error\n");
+
+    let token_source = r#"fn main() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let values: Vec<&str> = input.split_whitespace().collect();
+        println!("{}", values.len());
+    }"#;
+    let (_, c) = compile_pair(&dir, token_source);
+    let input_256 = vec!["1"; 256].join(" ");
+    let output = run_with_input(&c, input_256.as_bytes());
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"256\n");
+    let input_257 = vec!["1"; 257].join(" ");
+    let output = run_with_input(&c, input_257.as_bytes());
+    assert_eq!(output.status.code(), Some(101));
+    assert_eq!(output.stderr, b"idwc: too many input tokens\n");
+}
+
 /// 比較控制流程的輸出、scope、短路條件與巢狀 break／continue。
 #[test]
 fn control_flow_matches_rust_output() {
