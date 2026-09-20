@@ -114,8 +114,7 @@ allocation、slice、iterator，或完整的 `String`、`Vec`、`Debug` API。
 
 ## 安裝
 
-crates.io 目前提供 v1.1.0。使用測試過的 dependency lockfile 安裝此 registry
-版本：
+使用測試過的 dependency lockfile，從 crates.io 安裝已發布的 CLI：
 
 ```bash
 cargo install idwc --locked
@@ -124,11 +123,6 @@ cargo install idwc --locked
 Cargo 會自動下載、編譯 IdwC，並將 `idwc` 執行檔安裝到 Cargo 的 binary
 目錄，通常是 `~/.cargo/bin`。
 
-v1.1.1 是僅發布於 GitHub 的 patch release，可直接安裝指定 tag：
-
-```bash
-cargo install --git https://github.com/DanielQu9/idwc.git --tag v1.1.1 --locked
-```
 
 若要自行從 Git repository 下載並編譯：
 

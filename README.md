@@ -120,8 +120,7 @@ heap allocation, slices, iterators, or the complete `String`, `Vec`, and
 
 ## Installation
 
-crates.io currently carries v1.1.0. Install that registry release with its
-tested dependency lockfile:
+Install the released CLI from crates.io with its tested dependency lockfile:
 
 ```bash
 cargo install idwc --locked
@@ -130,11 +129,6 @@ cargo install idwc --locked
 Cargo downloads and compiles IdwC, then installs the `idwc` executable in
 Cargo's binary directory (normally `~/.cargo/bin`).
 
-v1.1.1 is a GitHub-only patch release. Install that exact tag with:
-
-```bash
-cargo install --git https://github.com/DanielQu9/idwc.git --tag v1.1.1 --locked
-```
 
 To build it yourself from the Git repository instead:
 
