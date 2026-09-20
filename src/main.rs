@@ -21,13 +21,16 @@ const HELP: &str = "IdwC — 將受支援的 Rust 子集轉譯為獨立的 C17 �
 選項：
   -o <output.c>          指定輸出檔案；省略時使用輸入檔名並改為 .c
   -s, --stupid           優先產生簡潔可讀的 C，並放棄部分嚴格語意保證
+  --string-capacity <B>  設定 bounded String 容量（bytes，預設 4096）
+  --vec-capacity <N>     設定固定 Vec 容量（elements，預設 2048）
   -h, --help             顯示此說明
   -V, --version          顯示版本
 
 範例：
   idwc hello.rs                  # 寫入 hello.c
   idwc hello.rs -o generated.c   # 寫入 generated.c
-  idwc --stupid hello.rs         # 以 Stupid Mode 寫入 hello.c";
+  idwc --stupid hello.rs         # 以 Stupid Mode 寫入 hello.c
+  idwc --string-capacity 8192 input.rs";
 
 /// 將 CLI 錯誤寫入 stderr，並回傳非零退出狀態。
 fn main() -> ExitCode {
@@ -67,6 +70,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut stupid = false;
     let mut input = None;
     let mut output = None;
+    let mut string_capacity = None;
+    let mut vec_capacity = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--stupid" || arg == "-s" {
@@ -82,6 +87,24 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Some(PathBuf::from(args.next().ok_or_else(|| {
                     format!("-o 後必須提供輸出檔案\n\n{USAGE}")
                 })?));
+        } else if arg == "--string-capacity" {
+            if string_capacity.is_some() {
+                return Err(format!("重複指定 --string-capacity\n\n{USAGE}").into());
+            }
+            string_capacity = Some(parse_capacity(
+                "--string-capacity",
+                args.next()
+                    .ok_or_else(|| format!("--string-capacity 後必須提供容量\n\n{USAGE}"))?,
+            )?);
+        } else if arg == "--vec-capacity" {
+            if vec_capacity.is_some() {
+                return Err(format!("重複指定 --vec-capacity\n\n{USAGE}").into());
+            }
+            vec_capacity = Some(parse_capacity(
+                "--vec-capacity",
+                args.next()
+                    .ok_or_else(|| format!("--vec-capacity 後必須提供容量\n\n{USAGE}"))?,
+            )?);
         } else if arg.to_string_lossy().starts_with('-') {
             return Err(format!("未知選項：{}\n\n{USAGE}", arg.to_string_lossy()).into());
         } else if input.is_some() {
@@ -99,11 +122,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let source = fs::read_to_string(&input)
         .map_err(|error| format!("讀取 {} 失敗：{error}", input.display()))?;
-    let options = idwc::TranspileOptions::new(if stupid {
+    let mut options = idwc::TranspileOptions::new(if stupid {
         idwc::TranspileMode::Stupid
     } else {
         idwc::TranspileMode::Strict
     });
+    if let Some(capacity) = string_capacity {
+        options = options.with_string_capacity(capacity);
+    }
+    if let Some(capacity) = vec_capacity {
+        options = options.with_vec_capacity(capacity);
+    }
     let generated = idwc::transpile_with_options(&source, options)?;
     if stupid {
         eprintln!("idwc: warning: --stupid prioritizes readable C over strict Rust semantics");
@@ -111,6 +140,23 @@ fn run() -> Result<(), Box<dyn Error>> {
     write_atomic(&output, generated.as_bytes())
         .map_err(|error| format!("寫入 {} 失敗：{error}", output.display()))?;
     Ok(())
+}
+
+fn parse_capacity(name: &str, value: std::ffi::OsString) -> Result<usize, Box<dyn Error>> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| format!("{name} 必須是十進位整數"))?;
+    let capacity = value
+        .parse::<usize>()
+        .map_err(|_| format!("{name} 必須是十進位整數"))?;
+    if !(1..=idwc::MAX_COLLECTION_CAPACITY).contains(&capacity) {
+        return Err(format!(
+            "{name} 必須介於 1 與 {} 之間",
+            idwc::MAX_COLLECTION_CAPACITY
+        )
+        .into());
+    }
+    Ok(capacity)
 }
 
 /// 先完整寫入同目錄暫存檔，再以 rename 取代目標，避免部分輸出。

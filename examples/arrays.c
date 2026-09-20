@@ -72,5 +72,13 @@ int main(void) {
     fputs(", length = ", stdout);
     printf("%zu", idwc_t13);
     putchar('\n');
+    fputs("scores = ", stdout);
+    putchar('[');
+    for (size_t idwc_t14 = 0; idwc_t14 < 4; ++idwc_t14) {
+        if (idwc_t14 != 0) { fputs(", ", stdout); }
+        printf("%" PRId32, idwc_v0[idwc_t14]);
+    }
+    putchar(']');
+    putchar('\n');
     return 0;
 }

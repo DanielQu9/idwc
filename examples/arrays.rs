@@ -16,4 +16,5 @@ fn main() {
         original[0],
         scores.len()
     );
+    println!("scores = {:?}", scores);
 }

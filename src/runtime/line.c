@@ -1,16 +1,10 @@
-#define IDWC_LINE_LIMIT ((size_t)4096)
-#define IDWC_TOKEN_LIMIT ((size_t)256)
-
-typedef struct {
-    unsigned char data[4096];
-    size_t length;
-} idwc_string;
+#define IDWC_TOKEN_LIMIT ((size_t)IDWC_VEC_CAPACITY_PLACEHOLDER)
 
 typedef struct {
     const idwc_string *source;
     size_t length;
-    size_t start[256];
-    size_t span[256];
+    size_t start[IDWC_VEC_CAPACITY_PLACEHOLDER];
+    size_t span[IDWC_VEC_CAPACITY_PLACEHOLDER];
 } idwc_tokens;
 
 uint32_t idwc_utf8_next(const unsigned char *data, size_t length, size_t *index) {

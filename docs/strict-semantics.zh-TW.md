@@ -3,7 +3,7 @@
 [English](strict-semantics.md) · [返回 README](../README.zh-TW.md) ·
 [Stupid Mode](stupid-mode.zh-TW.md)
 
-本文定義 IdwC v1.1.1 預設嚴格模式的翻譯契約。未列出的內容一律拒絕。
+本文定義 IdwC v1.2.0 預設嚴格模式的翻譯契約。未列出的內容一律拒絕。
 生成程式應在不依賴 C 未定義行為的前提下，保留所接受 Rust 子集的行為。
 可選的 `-s`／`--stupid` 生成器另有刻意放寬的[規格](stupid-mode.zh-TW.md)，
 不會改變嚴格模式行為。
@@ -31,7 +31,8 @@
   `f32` 與非十進位浮點。
 - 支援同 scope 及巢狀 shadowing。未定義或超出 scope 的名稱、不可變賦值、
   型別不符皆為錯誤。
-- 一般 String 和 Vec 值不受支援；輸入專用形式另見下文。
+- 下文定義限定的 `&str`、owned `String` 與固定容量 scalar `Vec<T>`；這不
+  代表支援一般 reference 或 collection。
 
 ## 運算式與求值
 
@@ -78,17 +79,42 @@ iterator、`.rev()`、`if let`、`while let`、`match` 和產生值的控制流�
 - 拒絕巢狀陣列、slice、reference、陣列參數／回傳、iterator method、陣列
   相等比較，以及索引臨時陣列 expression。
 
+## 固定容量 Vec
+
+- 本地 `Vec<T>` 支援 `T = i32`、`usize`、`f64` 或 `bool`。不支援 Vec
+  參數／回傳、巢狀 collection、reference、slice 或任意元素型別。
+- `Vec::new()` 與空 `vec![]` 必須有明確 `Vec<T>` 註記。非空 `vec![...]`
+  會推導一種支援的 scalar 元素型別，混合型別會被拒絕。`vec![value; N]`
+  只求值一次 `value`，`N` 必須是 0 到 65536 的無後綴整數字面量。
+- Storage 是固定 C array 加 logical length。預設容量為 2048 elements，可用
+  `--vec-capacity` 或 `TranspileOptions::with_vec_capacity` 逐次轉譯設定；不
+  使用 heap allocation，也不會動態擴容。
+- 可變 binding 支援 `push`、整體 Vec 賦值及元素賦值；支援 `.len()` 與命名
+  binding 的 `usize` 索引。Vec 索引的複合賦值目前不接受。
+- Vec 在 local binding 間採 move；讀取 moved value 會被拒絕。對可變且已
+  moved 的 binding 賦予新 Vec 後即可再次使用。
+- 建立或 `push` 超出設定容量時，會 flush stdout、向 stderr 寫入
+  `idwc: Vec capacity exceeded`，並以狀態 101 結束；寫入 C storage 前會先
+  檢查容量。
+- 索引只求值一次；越界時在存取 C storage 前 flush stdout、向 stderr 寫入
+  `idwc: Vec index out of bounds`，並以狀態 101 結束。
+- 不支援 clone、相等比較、`pop`、`insert`、`remove`、`clear`、容量 method、
+  iterator 與其他 Vec API。
+
 ## 輸出
 
 - 支援無參數的 `print!()` 和 `println!()`。
 - 其他形式必須先提供字串字面量，再依序提供引數。
-- `{}` 接受 `i32`、`usize`、`f64`、`bool`；`{:.0}` 到 `{:.18}` 只接受
-  `f64`；`{{`、`}}` 產生 literal brace。
+- `{}` 接受 `i32`、`usize`、`f64`、`bool`，以及下文定義的 `&str`、
+  `String`；`{:.0}` 到 `{:.18}` 只接受 `f64`；`{{`、`}}` 產生 literal brace。
+- `{:?}` 接受元素為 `i32`、`usize` 或 `bool` 的命名一維固定陣列與 Vec，
+  透過生成的 C 迴圈寫出 Rust 形式的方括號與 `, ` 分隔。`f64` collection
+  因尚未實作 Debug 的指數與小數點規則而明確拒絕。
 - 格式化訊息的所有引數會由左至右求值完畢，再開始寫出文字。
 - 純文字 `println!` 使用 `puts`，純文字 `print!` 使用 `fputs`。
 - 輸入文字不會成為 C format string。拒絕內嵌 NUL；UTF-8、控制 bytes 及
   問號會安全跳脫為 C17 字串。
-- 拒絕 captured、numbered、named、debug、width 和其他格式。
+- 拒絕 captured、numbered、named、alternate／pretty debug、width 和其他格式。
 - 除了下述明確 flush 契約，不保證 stdout I/O 失敗與 Rust 完全一致。
 
 ## 型別化 token 輸入
@@ -119,6 +145,25 @@ iterator、`.rev()`、`if let`、`while let`、`match` 和產生值的控制流�
 | 超過 128 token bytes | `idwc: input token too long` |
 | 顯式 stdout flush 失敗 | `idwc: stdout flush error` |
 
+## 限定字串值
+
+- 字串字面量使用限定的 `&str` 型別，可用 `{}` 輸出，也可綁定至推導或明確
+  註記的 `&str`；允許複製這類 binding。這不代表支援一般 reference、
+  lifetime、slice 或 borrowing。
+- Owned value 支援 `String::new()`、`String::from(&str)`、
+  `idwc::io::read_line()`、可變賦值、local binding 間的 move 與 `{}` 輸出；
+  函式仍不能接受或回傳字串型別。
+- Strict C 同時保存 bytes 與明確長度，因此 `String::from` 和輸出會保留內嵌
+  NUL byte 與 UTF-8。
+- owned String move 後再次使用會被拒絕。對可變且已 moved 的 binding 賦予
+  新值後即可再次使用；仍被 token collection 借用的 String 不能 move 或
+  賦值。
+- `String::from` 的來源超過設定的 payload 容量時，會輸出
+  `idwc: String capacity exceeded` 並以狀態 101 結束。
+
+一般串接、修改 method、clone、相等比較、字串索引、函式參數／回傳與任意
+`&str` expression 仍不在子集內。
+
 ## 限定行輸入
 
 行輸入接受以下本地模式：
@@ -130,12 +175,21 @@ let values: Vec<&str> = input.split_whitespace().collect();
 let number = values[0].parse::<f64>().unwrap();
 ```
 
-- 生成的 String 有 4096 bytes stack storage。`read_line` 採附加模式並保留
-  newline；若一開始即 EOF，成功且不修改內容。
-- 累積內容不可超過 4096 bytes，每次 read 後都必須是有效 UTF-8。
+v1.2.0 的便利介面會建立新的 bounded String，並以相同驗證規則讀取一次：
+
+```rust
+let input = idwc::io::read_line();
+let number = input.trim().parse::<f64>().unwrap();
+```
+
+- 生成的 String 預設有 4096 bytes stack storage。`read_line` 採附加模式並
+  保留 newline；若一開始即 EOF，成功且不修改內容。
+- `idwc::io::read_line()` 從空 String 開始，因此空 EOF 會回傳空 String；此
+  函式不接受引數。
+- 累積內容不可超過設定的 String 容量，每次 read 後都必須是有效 UTF-8。
 - `trim()`、`split_whitespace()` 使用與 Rust 相容的 Unicode White_Space。
-- 收集的 `Vec<&str>` 最多包含 256 個借用來源 buffer 的 stack span，不配置
-  或複製 token 文字。
+- 收集的 `Vec<&str>` 預設最多包含 2048 個借用來源 buffer 的 stack span，
+  不配置或複製 token 文字。
 - 同一 String 所產生的 token collection 仍在 lexical scope 時，保守拒絕
   再次 `read_line`。
 - 支援 `input.trim().parse::<i32|f64>().unwrap()` 和
@@ -151,15 +205,21 @@ let number = values[0].parse::<f64>().unwrap();
 | --- | --- |
 | stdin 錯誤 | `idwc: stdin I/O error` |
 | 無效 UTF-8 | `idwc: invalid UTF-8 input` |
-| 累積超過 4096 bytes | `idwc: input line buffer too long` |
-| 超過 256 tokens | `idwc: too many input tokens` |
+| 累積超過設定的 String 容量 | `idwc: input line buffer too long` |
+| 超過設定的 Vec 容量 | `idwc: too many input tokens` |
 | Token index 越界 | `idwc: token index out of bounds` |
 | 無效／超出範圍整數 | `idwc: invalid integer` / `idwc: integer out of range` |
 | 無效浮點 | `idwc: invalid float` |
 
 這些 `.unwrap()` 使用受控失敗，不重現 Rust panic 文字或 unwinding。拒絕一般
-allocation、String／Vec 賦值、clone、串接、函式參數／回傳、任意 method、
-slice、iterator 與 ownership。
+allocation、token collection 賦值、String clone／串接、collection 函式
+參數／回傳、任意 method、slice 與 iterator。
+
+`TranspileOptions::with_string_capacity`／`--string-capacity` 和
+`TranspileOptions::with_vec_capacity`／`--vec-capacity` 接受 1 到 65536；預設
+分別為 4096 bytes 與 2048 elements。這些是生成 C 的轉譯設定；原生
+`idwc::io::read_line()` 固定採預設 4096-byte 契約。容量越大、同時存活的
+collection 越多，生成程式的 stack 用量也越高。
 
 ## 整數語意
 
@@ -189,8 +249,8 @@ slice、iterator 與 ownership。
 
 ## 拒絕的語言功能
 
-嚴格子集拒絕 struct、enum、union、`char`、作為值的字串字面量、一般
-String／Vec 操作、其他整數型別、`f32`、cast、浮點餘數、`f64::NAN` 等
+嚴格子集拒絕 struct、enum、union、`char`、未列出的 String／Vec 操作、
+其他整數型別、`f32`、cast、浮點餘數、`f64::NAN` 等
 associated constant、多數數學 method、產生值的 block、label、closure、任意
 iterator chain、任意 macro、import、module、static、完整 `std`、async、
 unsafe、raw pointer、泛型、trait、複雜 ownership／borrowing，以及輸入程式的

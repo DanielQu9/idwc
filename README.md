@@ -82,7 +82,7 @@ The exact contract is documented in [Strict semantics](docs/strict-semantics.md)
 
 ## Milestones
 
-The current version is **v1.1.1**.
+The current version is **v1.2.0**.
 
 | Version | Goal | Status |
 | --- | --- | --- |
@@ -98,19 +98,18 @@ The current version is **v1.1.1**.
 | v1.0.0 | Frozen strict Rust subset and stable documentation | Completed |
 | v1.1.0 | Optional Stupid Mode for relaxed, readable C | Completed |
 | v1.1.1 | Detailed CLI help and optional `-o` output path | Completed |
-| v1.2.0 | Limited strings, fixed-capacity `Vec`, and collection output | Planned |
+| v1.2.0 | Limited strings, fixed-capacity `Vec`, and collection output | Completed |
 
-v1.2.0 is planned to add string-literal `&str` bindings, bounded owned
-`String` values, and a fixed-capacity `Vec<T>` subset for supported scalar
-types. The Vec subset will include `vec!`, creation, `push`, indexing, `.len()`,
-assignment/move, and dedicated `{:?}` output for Vec and fixed arrays. That
-format is lowered directly to a C loop; it does not implement Rust's general
-`Debug` trait system. `idwc::io::read_line() -> String` will provide a concise
-way to read one UTF-8 line into the bounded String type. Planned
-translation-time options will configure String capacity in bytes and Vec
-capacity in elements. These features will not claim general Rust references,
-heap allocation, slices, iterators, or the complete `String`, `Vec`, and
-`Debug` APIs.
+v1.2.0 supports string-literal `&str` bindings, bounded owned `String` values,
+`idwc::io::read_line() -> String`, and fixed-capacity `Vec<T>` for the supported
+scalar types. The Vec subset includes `Vec::new()`, both `vec!` forms, `push`,
+indexing, `.len()`, assignment, and local moves. Dedicated `{:?}` output for
+`i32`, `usize`, and `bool` Vecs and fixed arrays lowers directly to a C loop;
+`f64` collections are rejected until their Rust Debug formatting is matched.
+`--string-capacity` and `--vec-capacity` configure the generated stack storage.
+This does not provide general references, heap allocation, slices, iterators,
+or the complete `String`, `Vec`, and `Debug` APIs. Apparently "just use an
+array" becomes a design document when Rust semantics are invited to the party.
 
 ## Requirements
 
@@ -173,6 +172,12 @@ location. IdwC finishes translation before atomically replacing the output,
 so a translation or partial-write failure does not truncate an existing C
 file.
 
+Bounded strings default to 4096 payload bytes and fixed-capacity Vec storage
+defaults to 2048 elements. Set them per translation with
+`--string-capacity <bytes>` and `--vec-capacity <elements>`; each value must be
+between 1 and 65536. These settings change generated stack object sizes, so
+large values and many simultaneous collections increase stack usage.
+
 ### Integer range example
 
 ```rust
@@ -211,30 +216,39 @@ printf '70 1.75\n' | /tmp/idwc-line-input
 ```
 
 Other examples cover variables, control flow, functions and typed stdin,
-floating point, and fixed arrays. Every checked-in `examples/*.c` file is a
-golden output generated from its matching Rust source and verified by tests.
+floating point, fixed arrays, strings, and fixed-capacity Vecs. Every checked-in
+`examples/*.c` file is a golden output generated from its matching Rust source
+and verified by tests.
 
 ## Current subset at a glance
 
 - Exactly one private `fn main()` with no parameters or explicit return type.
 - Private helper functions with scalar parameters and scalar or unit returns;
   forward calls and recursion are supported.
-- `i32`, restricted `usize`, `f64`, `bool`, and one-dimensional fixed arrays.
+- `i32`, restricted `usize`, `f64`, `bool`, one-dimensional fixed arrays,
+  bounded strings, and fixed-capacity scalar Vecs.
 - Initialized `let` / `let mut`, assignment, shadowing, and lexical blocks.
 - Checked arithmetic, comparisons, boolean operators, and short-circuiting.
 - Statement-form `if` / `else if` / `else`, `while`, `loop`, and integer range
   `for`, with unlabeled `break` and `continue`.
 - `[T; N]`, array literals, repeat initialization, value copies, `.len()`, and
   checked `usize` indexing for scalar element types.
+- `Vec<T>` for `T = i32 | usize | f64 | bool`, with `Vec::new()`, `vec![...]`,
+  `vec![value; N]`, `push`, `.len()`, checked indexing, assignment, and moves.
 - `print!` / `println!`, including empty calls, sequential `{}` placeholders,
-  and `{:.0}` through `{:.18}` for `f64`.
-- `idwc::io::read_i32()`, `read_f64()`, and `flush_stdout()`.
+  `{:.0}` through `{:.18}` for `f64`, and limited collection `{:?}` output for
+  `i32`, `usize`, and `bool` arrays and Vecs.
+- `idwc::io::read_i32()`, `read_f64()`, `read_line()`, and `flush_stdout()`.
 - Limited `String::new()` → `read_line(...).unwrap()` → `trim()` /
   `split_whitespace()` → `parse::<i32|f64>().unwrap()` input flows.
+- `idwc::io::read_line()` as a shorter way to create and fill one bounded
+  `String`; it retains the newline and returns an empty String at empty EOF.
+- String-literal `&str` bindings plus bounded `String::new()` /
+  `String::from(&str)`, assignment, move checking, and `{}` output.
 - The `f64` method `powi(2)`.
 
-Notable exclusions include general String/Vec operations, string
-concatenation, slices, structs, enums, casts, `f32`, other integer types,
+Notable exclusions include unsupported String/Vec operations, string
+concatenation, cloning, slices, structs, enums, casts, `f32`, other integer types,
 general iterators, closures, `match`, async, unsafe, pointers, generics, traits,
 arbitrary macros, complete `std`, and input-program Cargo dependencies.
 

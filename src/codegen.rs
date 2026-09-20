@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
+use crate::TranspileOptions;
 use crate::ir::{
-    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, ParseSource, PrintPart, Program,
-    Statement, Type, UnaryOp,
+    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, ParseSource, PrintFormat,
+    PrintPart, Program, Statement, Type, UnaryOp,
 };
 
 /// 從已驗證 IR 生成僅依賴 C 標準函式庫的 C17 原始碼。
-pub(crate) fn generate(program: &Program) -> String {
+pub(crate) fn generate(program: &Program, options: TranspileOptions) -> String {
     let mut generator = Generator {
         body: String::new(),
         indent: 1,
@@ -63,6 +64,11 @@ pub(crate) fn generate(program: &Program) -> String {
     if generator.floating {
         output.push_str("#include <float.h>\n#include <math.h>\n#include <fenv.h>\n#include <locale.h>\n#include <string.h>\n");
     }
+    if (generator.helpers.contains("string") || generator.helpers.contains("line"))
+        && !generator.floating
+    {
+        output.push_str("#include <string.h>\n");
+    }
     if generator.target_usize {
         output.push_str(&format!(
             "_Static_assert(SIZE_MAX == UINT{}_MAX, \"idwc usize requires matching Rust and C target widths\");\n",
@@ -70,7 +76,7 @@ pub(crate) fn generate(program: &Program) -> String {
         ));
     }
     output.push('\n');
-    output.push_str(&runtime_helpers(&generator.helpers));
+    output.push_str(&runtime_helpers(&generator.helpers, options));
     if !prototypes.is_empty() {
         output.push_str(&prototypes);
         output.push('\n');
@@ -123,6 +129,18 @@ impl Generator {
                         self.array_let(*id, *mutable, value);
                         continue;
                     }
+                    if matches!(value.ty, Type::Vec(_)) {
+                        self.vec_let(*id, value);
+                        continue;
+                    }
+                    if matches!(value.kind, ExpressionKind::ReadString) {
+                        self.typed = true;
+                        self.helpers.insert("line");
+                        self.line(&format!("idwc_string idwc_v{id} = {{{{0}}, 0}};"));
+                        self.line(&format!("idwc_read_line(&idwc_v{id});"));
+                        self.line(&format!("(void)idwc_v{id};"));
+                        continue;
+                    }
                     let initializer = self.expression(value);
                     let qualifier = if *mutable { "" } else { "const " };
                     self.line(&format!(
@@ -135,6 +153,17 @@ impl Generator {
                 Statement::Assign { id, value } => {
                     if matches!(value.ty, Type::Array(_, _)) {
                         self.array_assign(*id, value);
+                        continue;
+                    }
+                    if matches!(value.ty, Type::Vec(_)) {
+                        self.vec_assign(*id, value);
+                        continue;
+                    }
+                    if matches!(value.kind, ExpressionKind::ReadString) {
+                        self.typed = true;
+                        self.helpers.insert("line");
+                        self.line(&format!("idwc_v{id}.length = 0;"));
+                        self.line(&format!("idwc_read_line(&idwc_v{id});"));
                         continue;
                     }
                     let value = self.expression(value);
@@ -156,6 +185,34 @@ impl Generator {
                         right
                     };
                     self.line(&format!("idwc_v{id}[{index}] = {result};"));
+                }
+                Statement::VecAssignIndex { id, index, value } => {
+                    let right = self.expression(value);
+                    let right_temp = self.temp_name();
+                    self.line(&format!(
+                        "const {} {right_temp} = {right};",
+                        c_type(value.ty)
+                    ));
+                    let index = self.expression(index);
+                    let index_temp = self.temp_name();
+                    self.line(&format!("const size_t {index_temp} = {index};"));
+                    self.helpers.insert("vec");
+                    self.line(&format!(
+                        "idwc_v{id}.data[idwc_vec_index(idwc_v{id}.length, {index_temp})] = {right_temp};"
+                    ));
+                }
+                Statement::VecPush { id, value } => {
+                    let value_text = self.expression(value);
+                    let temp = self.temp_name();
+                    self.line(&format!(
+                        "const {} {temp} = {value_text};",
+                        c_type(value.ty)
+                    ));
+                    self.helpers.insert("vec");
+                    self.line(&format!(
+                        "idwc_vec_require_capacity(idwc_v{id}.length + 1);"
+                    ));
+                    self.line(&format!("idwc_v{id}.data[idwc_v{id}.length++] = {temp};"));
                 }
                 Statement::Block(statements) => {
                     self.line("{");
@@ -316,6 +373,13 @@ impl Generator {
         }
         let mut values = Vec::new();
         for argument in arguments {
+            if matches!(argument.ty, Type::Array(_, _) | Type::Vec(_)) {
+                let ExpressionKind::Variable(id) = argument.kind else {
+                    unreachable!("Debug collection arguments are validated as bindings")
+                };
+                values.push(format!("idwc_v{id}"));
+                continue;
+            }
             let value = self.expression(argument);
             let temp = self.temp_name();
             self.line(&format!("const {} {temp} = {value};", c_type(argument.ty)));
@@ -326,25 +390,41 @@ impl Generator {
                 PrintPart::Text(text) if !text.is_empty() => {
                     self.line(&format!("fputs(\"{}\", stdout);", escape_string(text)));
                 }
-                PrintPart::Argument { index, precision } => match arguments[*index].ty {
-                    Type::I32 => self.line(&format!("printf(\"%\" PRId32, {});", values[*index])),
-                    Type::Usize => self.line(&format!("printf(\"%zu\", {});", values[*index])),
-                    Type::Bool => self.line(&format!(
-                        "fputs({} ? \"true\" : \"false\", stdout);",
-                        values[*index]
-                    )),
-                    Type::F64 => {
-                        self.helpers.insert("float_print");
-                        self.line(&format!(
-                            "idwc_print_f64({}, {});",
-                            values[*index],
-                            precision.map_or(-1, i32::from)
-                        ));
+                PrintPart::Argument { index, format } => {
+                    let value = values[*index].clone();
+                    match format {
+                        PrintFormat::Debug => {
+                            self.debug_collection(arguments[*index].ty, &value);
+                        }
+                        PrintFormat::Precision(precision) => {
+                            self.helpers.insert("float_print");
+                            self.line(&format!("idwc_print_f64({value}, {precision});"));
+                        }
+                        PrintFormat::Display => match arguments[*index].ty {
+                            Type::I32 => {
+                                self.line(&format!("printf(\"%\" PRId32, {value});"));
+                            }
+                            Type::Usize => self.line(&format!("printf(\"%zu\", {value});")),
+                            Type::Bool => self
+                                .line(&format!("fputs({value} ? \"true\" : \"false\", stdout);")),
+                            Type::F64 => {
+                                self.helpers.insert("float_print");
+                                self.line(&format!("idwc_print_f64({value}, -1);"));
+                            }
+                            Type::Str => {
+                                self.helpers.insert("string");
+                                self.line(&format!("idwc_print_str({value});"));
+                            }
+                            Type::String => {
+                                self.helpers.insert("string");
+                                self.line(&format!("idwc_print_string(&{value});"));
+                            }
+                            Type::Unit | Type::Array(_, _) | Type::Vec(_) | Type::Tokens => {
+                                unreachable!("Display arguments are validated as scalar")
+                            }
+                        },
                     }
-                    Type::Unit | Type::Array(_, _) | Type::String | Type::Tokens => {
-                        unreachable!("格式參數已驗證為 scalar")
-                    }
-                },
+                }
                 _ => {}
             }
         }
@@ -353,11 +433,49 @@ impl Generator {
         }
     }
 
+    fn debug_collection(&mut self, ty: Type, value: &str) {
+        let (element, length, item) = match ty {
+            Type::Array(element, length) => {
+                (element, length.to_string(), format!("{value}[{{index}}]"))
+            }
+            Type::Vec(element) => (
+                element,
+                format!("{value}.length"),
+                format!("{value}.data[{{index}}]"),
+            ),
+            _ => unreachable!("Debug arguments are validated as collections"),
+        };
+        self.typed = true;
+        self.target_usize = true;
+        self.line("putchar('[');");
+        let index = self.temp_name();
+        self.line(&format!(
+            "for (size_t {index} = 0; {index} < {length}; ++{index}) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("if ({index} != 0) {{ fputs(\", \", stdout); }}"));
+        let item = item.replace("{index}", &index);
+        match element {
+            ArrayElement::I32 => self.line(&format!("printf(\"%\" PRId32, {item});")),
+            ArrayElement::Usize => self.line(&format!("printf(\"%zu\", {item});")),
+            ArrayElement::Bool => {
+                self.line(&format!("fputs({item} ? \"true\" : \"false\", stdout);"));
+            }
+            ArrayElement::F64 => unreachable!("f64 Debug collection is rejected semantically"),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("putchar(']');");
+    }
+
     /// 運算式產生原子值或已求值的暫存值；左右 operand 依序求值。
     fn expression(&mut self, expression: &Expression) -> String {
         self.typed = true;
         self.floating |= expression.ty == Type::F64;
-        self.target_usize |= matches!(expression.ty, Type::Usize | Type::Array(_, _));
+        self.target_usize |= matches!(
+            expression.ty,
+            Type::Usize | Type::Array(_, _) | Type::Vec(_)
+        );
         let value = match &expression.kind {
             ExpressionKind::Unit => return "0".into(),
             ExpressionKind::ReadI32 => {
@@ -419,9 +537,38 @@ impl Generator {
             ExpressionKind::ArrayLength(length) => {
                 return format!("((size_t)UINT64_C({length}))");
             }
+            ExpressionKind::VecIndex { id, index } => {
+                let index = self.expression(index);
+                let temp = self.temp_name();
+                self.line(&format!("const size_t {temp} = {index};"));
+                self.helpers.insert("vec");
+                return format!("idwc_v{id}.data[idwc_vec_index(idwc_v{id}.length, {temp})]");
+            }
+            ExpressionKind::VecLength(id) => {
+                return format!("idwc_v{id}.length");
+            }
+            ExpressionKind::StringLiteral(value) => {
+                self.helpers.insert("string");
+                return format!(
+                    "((idwc_str){{(const unsigned char *)\"{}\", ((size_t)UINT64_C({}))}})",
+                    escape_string(value),
+                    value.len()
+                );
+            }
             ExpressionKind::StringNew => {
-                self.helpers.insert("line");
+                self.helpers.insert("string");
                 "((idwc_string){{0}, 0})".into()
+            }
+            ExpressionKind::StringFrom(value) => {
+                self.helpers.insert("string");
+                let value = self.expression(value);
+                format!("idwc_string_from({value})")
+            }
+            ExpressionKind::Vec(_) | ExpressionKind::VecRepeat(_, _) | ExpressionKind::VecNew => {
+                unreachable!("Vec aggregate expressions are emitted by binding statements")
+            }
+            ExpressionKind::ReadString => {
+                unreachable!("String-producing input is emitted by its binding statement")
             }
             ExpressionKind::ReadLine(id) => {
                 self.helpers.insert("line");
@@ -536,6 +683,73 @@ impl Generator {
             ));
         }
         temp
+    }
+
+    fn vec_let(&mut self, id: usize, value: &Expression) {
+        let Type::Vec(element) = value.ty else {
+            unreachable!("vec_let only accepts Vec values")
+        };
+        self.note_vec(element);
+        if let ExpressionKind::Variable(source) = &value.kind {
+            self.line(&format!(
+                "{} idwc_v{id} = idwc_v{source};",
+                c_type(value.ty)
+            ));
+        } else {
+            self.line(&format!("{} idwc_v{id} = {{{{0}}, 0}};", c_type(value.ty)));
+            self.vec_fill(&format!("idwc_v{id}"), value);
+        }
+        self.line(&format!("(void)idwc_v{id};"));
+    }
+
+    fn vec_assign(&mut self, id: usize, value: &Expression) {
+        let Type::Vec(element) = value.ty else {
+            unreachable!("vec_assign only accepts Vec values")
+        };
+        self.note_vec(element);
+        if let ExpressionKind::Variable(source) = &value.kind {
+            self.line(&format!("idwc_v{id} = idwc_v{source};"));
+            return;
+        }
+        let temp = self.temp_name();
+        self.line(&format!("{} {temp} = {{{{0}}, 0}};", c_type(value.ty)));
+        self.vec_fill(&temp, value);
+        self.line(&format!("idwc_v{id} = {temp};"));
+    }
+
+    fn vec_fill(&mut self, target: &str, value: &Expression) {
+        match &value.kind {
+            ExpressionKind::VecNew => {}
+            ExpressionKind::Vec(values) => {
+                self.helpers.insert("vec");
+                self.line(&format!("idwc_vec_require_capacity({});", values.len()));
+                for value in values {
+                    let value = self.snapshot(value);
+                    self.line(&format!("{target}.data[{target}.length++] = {value};"));
+                }
+            }
+            ExpressionKind::VecRepeat(value, length) => {
+                self.helpers.insert("vec");
+                self.line(&format!("idwc_vec_require_capacity({length});"));
+                let value = self.snapshot(value);
+                let index = self.temp_name();
+                self.line(&format!(
+                    "for (size_t {index} = 0; {index} < {length}; ++{index}) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("{target}.data[{target}.length++] = {value};"));
+                self.indent -= 1;
+                self.line("}");
+            }
+            _ => unreachable!("Vec values are validated before code generation"),
+        }
+    }
+
+    fn note_vec(&mut self, element: ArrayElement) {
+        self.typed = true;
+        self.target_usize = true;
+        self.floating |= element == ArrayElement::F64;
+        self.helpers.insert("vec");
     }
 
     fn array_let(&mut self, id: usize, mutable: bool, value: &Expression) {
@@ -680,6 +894,11 @@ fn c_type(ty: Type) -> &'static str {
         Type::Bool => "bool",
         Type::Unit => "void",
         Type::Array(_, _) => unreachable!("C scalar 型別不接受陣列"),
+        Type::Vec(ArrayElement::I32) => "idwc_vec_i32",
+        Type::Vec(ArrayElement::Usize) => "idwc_vec_usize",
+        Type::Vec(ArrayElement::F64) => "idwc_vec_f64",
+        Type::Vec(ArrayElement::Bool) => "idwc_vec_bool",
+        Type::Str => "idwc_str",
         Type::String => "idwc_string",
         Type::Tokens => "idwc_tokens",
     }
@@ -711,7 +930,7 @@ fn function_signature(function: &Function) -> String {
 }
 
 /// 只生成實際使用的檢查函式；先提升至 int64_t，避免 C signed overflow。
-fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
+fn runtime_helpers(helpers: &BTreeSet<&str>, options: TranspileOptions) -> String {
     if helpers.is_empty() {
         return String::new();
     }
@@ -729,12 +948,30 @@ fn runtime_helpers(helpers: &BTreeSet<&str>) -> String {
     if helpers.contains("token") {
         output.push_str(include_str!("runtime/token.c"));
     }
+    if helpers.contains("string") || helpers.contains("line") {
+        let string = include_str!("runtime/string.c").replace(
+            "IDWC_STRING_CAPACITY_PLACEHOLDER",
+            &options.string_capacity().to_string(),
+        );
+        output.push_str(&string);
+    }
     if helpers.contains("line") {
-        output.push_str(include_str!("runtime/line.c"));
+        let line = include_str!("runtime/line.c").replace(
+            "IDWC_VEC_CAPACITY_PLACEHOLDER",
+            &options.vec_capacity().to_string(),
+        );
+        output.push_str(&line);
+    }
+    if helpers.contains("vec") {
+        let vec = include_str!("runtime/vec.c").replace(
+            "IDWC_VEC_CAPACITY_PLACEHOLDER",
+            &options.vec_capacity().to_string(),
+        );
+        output.push_str(&vec);
     }
     for helper in helpers {
         match *helper {
-            "token" | "bounds" | "line" => {}
+            "token" | "bounds" | "string" | "line" | "vec" => {}
             "line_parse_i32" => output.push_str(include_str!("runtime/line_parse_i32.c")),
             "line_parse_f64" => output.push_str(include_str!("runtime/line_parse_f64.c")),
             "float" => output.push_str(include_str!("runtime/float.c")),

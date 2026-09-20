@@ -1,6 +1,9 @@
 use syn::{Expr, LitStr, Token, parse::Parser};
 
-use crate::{TranspileError, ir::PrintPart};
+use crate::{
+    TranspileError,
+    ir::{PrintFormat, PrintPart},
+};
 
 /// 解析 print!／println! 的字串與參數，不展開或執行巨集。
 pub(crate) fn parse(mac: &syn::Macro) -> Result<(Vec<PrintPart>, Vec<Expr>), TranspileError> {
@@ -51,40 +54,55 @@ fn decode(value: &str, argument_count: usize) -> Result<Vec<PrintPart>, Transpil
                     parts.push(PrintPart::Text(std::mem::take(&mut text)));
                     parts.push(PrintPart::Argument {
                         index: next_argument,
-                        precision: None,
+                        format: PrintFormat::Display,
                     });
                     next_argument += 1;
                 }
-                Some(':') if chars.next() == Some('.') => {
-                    let mut digits = String::new();
-                    loop {
-                        match chars.next() {
-                            Some(ch) if ch.is_ascii_digit() => digits.push(ch),
-                            Some('}') => break,
-                            _ => {
-                                return Err(TranspileError::unsupported(
-                                    "浮點精度格式僅接受 {:.0} 至 {:.18}",
-                                ));
+                Some(':') => match chars.next() {
+                    Some('?') if chars.next() == Some('}') => {
+                        parts.push(PrintPart::Text(std::mem::take(&mut text)));
+                        parts.push(PrintPart::Argument {
+                            index: next_argument,
+                            format: PrintFormat::Debug,
+                        });
+                        next_argument += 1;
+                    }
+                    Some('.') => {
+                        let mut digits = String::new();
+                        loop {
+                            match chars.next() {
+                                Some(ch) if ch.is_ascii_digit() => digits.push(ch),
+                                Some('}') => break,
+                                _ => {
+                                    return Err(TranspileError::unsupported(
+                                        "浮點精度格式僅接受 {:.0} 至 {:.18}",
+                                    ));
+                                }
                             }
                         }
+                        let precision = digits
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|value| *value <= 18)
+                            .ok_or(TranspileError::unsupported(
+                                "浮點精度格式僅接受 {:.0} 至 {:.18}",
+                            ))?;
+                        parts.push(PrintPart::Text(std::mem::take(&mut text)));
+                        parts.push(PrintPart::Argument {
+                            index: next_argument,
+                            format: PrintFormat::Precision(precision),
+                        });
+                        next_argument += 1;
                     }
-                    let precision = digits
-                        .parse::<u8>()
-                        .ok()
-                        .filter(|value| *value <= 18)
-                        .ok_or(TranspileError::unsupported(
-                            "浮點精度格式僅接受 {:.0} 至 {:.18}",
-                        ))?;
-                    parts.push(PrintPart::Text(std::mem::take(&mut text)));
-                    parts.push(PrintPart::Argument {
-                        index: next_argument,
-                        precision: Some(precision),
-                    });
-                    next_argument += 1;
-                }
+                    _ => {
+                        return Err(TranspileError::unsupported(
+                            "僅接受 {}、{:?} 與 {:.0} 至 {:.18}",
+                        ));
+                    }
+                },
                 _ => {
                     return Err(TranspileError::unsupported(
-                        "僅接受 {} 佔位符與 {{／}} 文字大括號",
+                        "僅接受 {}、{:?}、有限浮點精度與 {{／}} 文字大括號",
                     ));
                 }
             },
@@ -102,7 +120,7 @@ fn decode(value: &str, argument_count: usize) -> Result<Vec<PrintPart>, Transpil
 
 #[cfg(test)]
 mod tests {
-    use super::{PrintPart, decode};
+    use super::{PrintFormat, PrintPart, decode};
 
     /// 格式大括號應逐對解碼，拒絕多餘或不完整的大括號。
     #[test]
@@ -121,5 +139,20 @@ mod tests {
         assert!(decode("{{}}", 1).is_err());
         assert!(decode("{}", 0).is_err());
         assert!(decode("{}", 2).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_limited_debug_placeholder() {
+        let parts = decode("values = {:?}", 1).unwrap();
+        assert!(matches!(
+            &parts[1],
+            PrintPart::Argument {
+                index: 0,
+                format: PrintFormat::Debug
+            }
+        ));
+        for value in ["{:#?}", "{:??}", "{:?x}"] {
+            assert!(decode(value, 1).is_err(), "應拒絕：{value}");
+        }
     }
 }

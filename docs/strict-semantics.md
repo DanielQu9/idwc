@@ -3,7 +3,7 @@
 [繁體中文](strict-semantics.zh-TW.md) · [Back to README](../README.md) ·
 [Stupid Mode](stupid-mode.md)
 
-This document defines the default strict translation contract for IdwC v1.1.1.
+This document defines the default strict translation contract for IdwC v1.2.0.
 Anything not listed here is rejected. The generated program aims to preserve
 the behavior of the accepted Rust subset without relying on C undefined
 behavior. The optional `-s` / `--stupid` generator has a separate, deliberately
@@ -35,8 +35,8 @@ relaxed [contract](stupid-mode.md) and does not change strict-mode behavior.
   and underscores are accepted. `f32` and nondecimal floats are rejected.
 - Same-scope and nested shadowing are supported. Undefined names, values used
   outside their scope, immutable assignment, and type mismatches are errors.
-- General String and Vec values are not supported. Their limited input-only
-  forms are defined below.
+- Limited `&str`, owned `String`, and fixed-capacity scalar `Vec<T>` values are
+  defined below. They do not enable general references or collections.
 
 ## Expressions and evaluation
 
@@ -89,18 +89,50 @@ control-flow expressions are rejected.
 - Nested arrays, slices, references, array parameters/returns, iterator methods,
   array equality, and indexing temporary array expressions are rejected.
 
+## Fixed-capacity Vec
+
+- Local `Vec<T>` supports `T = i32`, `usize`, `f64`, or `bool`. Vec parameters,
+  returns, nested collections, references, slices, and arbitrary element types
+  are rejected.
+- `Vec::new()` and an empty `vec![]` require an explicit `Vec<T>` annotation.
+  Nonempty `vec![...]` infers one supported scalar element type; mixed types
+  are rejected. `vec![value; N]` evaluates `value` once, and `N` is an
+  unsuffixed integer literal from 0 through 65536.
+- Storage is a fixed C array plus a logical length. The default capacity is
+  2048 elements and may be set per translation with `--vec-capacity` or
+  `TranspileOptions::with_vec_capacity`; there is no heap allocation or growth.
+- Mutable bindings support `push`, whole-Vec assignment, and element assignment.
+  `.len()` and named-binding `usize` indexing are supported. Vec index compound
+  assignment is not yet accepted.
+- Vec values move between local bindings. Reading a moved value is rejected;
+  assigning a fresh Vec to a mutable moved binding makes it usable again.
+- Construction or `push` beyond the configured capacity flushes stdout, writes
+  `idwc: Vec capacity exceeded` to stderr, and exits with status 101. The
+  capacity is checked before C storage is written.
+- Index failure evaluates the index once, then flushes stdout, writes
+  `idwc: Vec index out of bounds` to stderr, and exits with status 101 before
+  accessing C storage.
+- Cloning, equality, `pop`, `insert`, `remove`, `clear`, capacity methods,
+  iterators, and other Vec APIs are rejected.
+
 ## Output
 
 - Empty `print!()` and `println!()` are accepted.
 - Other calls require a string literal followed by sequential arguments.
-- `{}` accepts `i32`, `usize`, `f64`, and `bool`. `{:.0}` through `{:.18}`
-  accept `f64`. `{{` and `}}` produce literal braces.
+- `{}` accepts `i32`, `usize`, `f64`, `bool`, `&str`, and `String` as documented
+  below. `{:.0}` through `{:.18}` accept `f64`. `{{` and `}}` produce literal
+  braces.
+- `{:?}` accepts named one-dimensional fixed arrays and Vecs whose element type
+  is `i32`, `usize`, or `bool`. It writes Rust-style brackets and `, ` separators
+  using a generated C loop. `f64` collections are rejected because their Debug
+  exponent and trailing-decimal rules are not yet implemented.
 - Arguments are evaluated left to right before any part of a formatted message
   is written.
 - Text-only `println!` uses `puts`; text-only `print!` uses `fputs`.
 - Input text never becomes a C format string. Embedded NUL is rejected. UTF-8,
   control bytes, and question marks are escaped safely for C17.
-- Captured, numbered, named, debug, width, and other format forms are rejected.
+- Captured, numbered, named, alternate/pretty debug, width, and other format
+  forms are rejected.
 - stdout I/O failure behavior is not guaranteed to match Rust, except for the
   explicit flush contract below.
 
@@ -132,6 +164,27 @@ Failures flush stdout, write the listed diagnostic, and exit with status 101:
 | More than 128 token bytes | `idwc: input token too long` |
 | Explicit stdout flush failure | `idwc: stdout flush error` |
 
+## Limited string values
+
+- A string literal has the limited `&str` type. It may be printed with `{}` or
+  bound to an inferred or explicit `&str`; copying such a binding is allowed.
+  This does not enable general references, lifetimes, slices, or borrowing.
+- Owned values support `String::new()`, `String::from(&str)`,
+  `idwc::io::read_line()`, mutable assignment, moves between local bindings,
+  and `{}` output. Functions still cannot accept or return string types.
+- Strict C stores both bytes and an explicit length. Embedded NUL bytes and
+  UTF-8 are therefore preserved during `String::from` and output.
+- Using an owned String after a move is rejected. Assigning a new value to a
+  mutable moved binding makes it usable again. A String borrowed by a live
+  token collection cannot be moved or assigned.
+- `String::from` fails with status 101 and
+  `idwc: String capacity exceeded` when the source exceeds the configured
+  payload capacity.
+
+General concatenation, mutation methods, cloning, equality, string indexing,
+function parameters/returns, and arbitrary `&str` expressions remain outside
+the subset.
+
 ## Limited line input
 
 The line path accepts the following local pattern:
@@ -143,13 +196,23 @@ let values: Vec<&str> = input.split_whitespace().collect();
 let number = values[0].parse::<f64>().unwrap();
 ```
 
-- A generated String has 4096 bytes of stack storage. `read_line` appends,
-  retains the newline, and succeeds without modification on empty EOF.
-- Accumulated content may not exceed 4096 bytes and must be valid UTF-8 after
-  every read.
+The v1.2.0 convenience API creates a fresh bounded String and performs one
+read with the same validation:
+
+```rust
+let input = idwc::io::read_line();
+let number = input.trim().parse::<f64>().unwrap();
+```
+
+- A generated String has 4096 bytes of stack storage by default. `read_line`
+  appends, retains the newline, and succeeds without modification on empty EOF.
+- `idwc::io::read_line()` starts from an empty String, so empty EOF returns an
+  empty String. It accepts no arguments.
+- Accumulated content may not exceed the configured String capacity and must
+  be valid UTF-8 after every read.
 - `trim()` and `split_whitespace()` use Rust-compatible Unicode White_Space.
-- A collected `Vec<&str>` is at most 256 stack-allocated spans borrowing the
-  source buffer. It does not allocate or copy token text.
+- A collected `Vec<&str>` is at most 2048 stack-allocated spans by default,
+  borrowing the source buffer. It does not allocate or copy token text.
 - Another `read_line` is conservatively rejected while a token collection from
   the same String remains in lexical scope.
 - `input.trim().parse::<i32|f64>().unwrap()` and
@@ -165,16 +228,23 @@ Line-runtime failures use status 101:
 | --- | --- |
 | stdin error | `idwc: stdin I/O error` |
 | Invalid UTF-8 | `idwc: invalid UTF-8 input` |
-| More than 4096 accumulated bytes | `idwc: input line buffer too long` |
-| More than 256 tokens | `idwc: too many input tokens` |
+| More than the configured String capacity | `idwc: input line buffer too long` |
+| More than the configured Vec capacity | `idwc: too many input tokens` |
 | Token index out of bounds | `idwc: token index out of bounds` |
 | Invalid/out-of-range integer | `idwc: invalid integer` / `idwc: integer out of range` |
 | Invalid float | `idwc: invalid float` |
 
 These `.unwrap()` forms use controlled failure rather than reproducing Rust
-panic text or unwinding. General allocation, String/Vec assignment, cloning,
-concatenation, function parameters/returns, arbitrary methods, slices,
-iterators, and ownership are rejected.
+panic text or unwinding. General allocation, token-collection assignment,
+String cloning or concatenation, collection function parameters/returns,
+arbitrary methods, slices, and iterators are rejected.
+
+`TranspileOptions::with_string_capacity` / `--string-capacity` and
+`TranspileOptions::with_vec_capacity` / `--vec-capacity` accept values from 1
+through 65536. Their defaults are 4096 bytes and 2048 elements. They are
+translation settings for generated C; the native `idwc::io::read_line()`
+implementation uses the default 4096-byte contract. Larger values and multiple
+live collections increase generated stack usage.
 
 ## Integer semantics
 
@@ -206,8 +276,8 @@ iterators, and ownership are rejected.
 
 ## Rejected language features
 
-The strict subset rejects structs, enums, unions, `char`, string literals as
-values, general String/Vec operations, additional integer types, `f32`, casts,
+The strict subset rejects structs, enums, unions, `char`, unsupported
+String/Vec operations, additional integer types, `f32`, casts,
 floating remainder, associated constants such as `f64::NAN`, most math methods,
 value-producing blocks, labels, closures, arbitrary iterator chains, arbitrary
 macros, imports, modules, statics, complete `std`, async, unsafe, raw pointers,

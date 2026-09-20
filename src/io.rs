@@ -1,6 +1,8 @@
-//! 有限的 i32／f64 輸入與 flush 介面，供 Rust 範例與生成的 C 共用規格。
+//! 有限的數值／文字輸入與 flush 介面，供 Rust 範例與生成的 C 共用規格。
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
+
+const LINE_LIMIT: usize = 4096;
 
 /// 讀取下一個由 ASCII 空白分隔的十進位 `i32`。
 ///
@@ -21,6 +23,17 @@ pub fn read_i32() -> i32 {
 /// EOF、I/O、格式、範圍或長度錯誤會輸出診斷並以狀態 101 結束。
 pub fn read_f64() -> f64 {
     match read_float_from(&mut std::io::stdin().lock()) {
+        Ok(value) => value,
+        Err(error) => fail(error.message()),
+    }
+}
+
+/// 讀取一整行 UTF-8 文字並保留結尾換行。
+///
+/// 空 EOF 回傳空 [`String`]。輸入最多 4096 bytes；I/O、UTF-8 或長度錯誤
+/// 會 flush stdout、輸出診斷並以狀態 101 結束。
+pub fn read_line() -> String {
+    match read_line_from(&mut std::io::stdin().lock()) {
         Ok(value) => value,
         Err(error) => fail(error.message()),
     }
@@ -50,6 +63,8 @@ enum InputError {
     TooLong,
     InvalidFloat,
     FloatRange,
+    InvalidUtf8,
+    LineTooLong,
 }
 
 impl InputError {
@@ -62,6 +77,8 @@ impl InputError {
             Self::TooLong => "idwc: input token too long\n",
             Self::InvalidFloat => "idwc: invalid float\n",
             Self::FloatRange => "idwc: float out of range\n",
+            Self::InvalidUtf8 => "idwc: invalid UTF-8 input\n",
+            Self::LineTooLong => "idwc: input line buffer too long\n",
         }
     }
 }
@@ -188,10 +205,22 @@ fn read_float_from(reader: &mut impl Read) -> Result<f64, InputError> {
     Ok(value)
 }
 
+fn read_line_from(reader: &mut impl BufRead) -> Result<String, InputError> {
+    let mut bytes = Vec::with_capacity(LINE_LIMIT + 1);
+    (&mut *reader)
+        .take((LINE_LIMIT + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| InputError::Io)?;
+    if bytes.len() > LINE_LIMIT {
+        return Err(InputError::LineTooLong);
+    }
+    String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InputError, read_float_from, read_from};
-    use std::io::{Cursor, Read};
+    use super::{InputError, read_float_from, read_from, read_line_from};
+    use std::io::{BufReader, Cursor, Read};
 
     #[test]
     fn repeated_reads_and_boundaries() {
@@ -271,6 +300,38 @@ mod tests {
             read_float_from(&mut "-0e9999".as_bytes())
                 .unwrap()
                 .is_sign_negative()
+        );
+    }
+
+    #[test]
+    fn reads_bounded_utf8_lines() {
+        let mut input = Cursor::new("哈囉\nsecond".as_bytes());
+        assert_eq!(read_line_from(&mut input), Ok("哈囉\n".into()));
+        assert_eq!(read_line_from(&mut input), Ok("second".into()));
+        assert_eq!(read_line_from(&mut input), Ok(String::new()));
+
+        assert_eq!(
+            read_line_from(&mut Cursor::new(vec![b'a'; 4096])),
+            Ok("a".repeat(4096))
+        );
+        assert_eq!(
+            read_line_from(&mut Cursor::new(vec![b'a'; 4097])),
+            Err(InputError::LineTooLong)
+        );
+        assert_eq!(
+            read_line_from(&mut Cursor::new(b"\xff\n")),
+            Err(InputError::InvalidUtf8)
+        );
+
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("test failure"))
+            }
+        }
+        assert_eq!(
+            read_line_from(&mut BufReader::new(Broken)),
+            Err(InputError::Io)
         );
     }
 }

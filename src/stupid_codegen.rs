@@ -1,14 +1,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::TranspileOptions;
 use crate::ir::{
-    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, Parameter, ParseSource, Program,
-    Statement, Type, UnaryOp,
+    ArrayElement, BinaryOp, Expression, ExpressionKind, Function, Parameter, ParseSource,
+    PrintFormat, Program, Statement, Type, UnaryOp,
 };
 
 /// Generates readable C17 while intentionally omitting strict Rust runtime checks.
-pub(crate) fn generate(program: &Program) -> String {
+pub(crate) fn generate(program: &Program, options: TranspileOptions) -> String {
     let function_names = allocate_function_names(&program.functions);
-    let mut generator = Generator::new(&function_names);
+    let mut generator = Generator::new(&function_names, options);
     let mut prototypes = String::new();
     let mut functions = String::new();
 
@@ -65,12 +66,15 @@ struct Generator<'a> {
     function_names: &'a HashMap<usize, String>,
     binding_names: HashMap<usize, String>,
     token_length_names: HashMap<usize, String>,
+    vec_length_names: HashMap<usize, String>,
     names: NameAllocator,
     in_main: bool,
+    string_capacity: usize,
+    vec_capacity: usize,
 }
 
 impl<'a> Generator<'a> {
-    fn new(function_names: &'a HashMap<usize, String>) -> Self {
+    fn new(function_names: &'a HashMap<usize, String>, options: TranspileOptions) -> Self {
         Self {
             body: String::new(),
             indent: 1,
@@ -79,8 +83,11 @@ impl<'a> Generator<'a> {
             function_names,
             binding_names: HashMap::new(),
             token_length_names: HashMap::new(),
+            vec_length_names: HashMap::new(),
             names: NameAllocator::default(),
             in_main: false,
+            string_capacity: options.string_capacity(),
+            vec_capacity: options.vec_capacity(),
         }
     }
 
@@ -88,6 +95,7 @@ impl<'a> Generator<'a> {
     fn prepare_function(&mut self, parameters: &[Parameter], statements: &[Statement]) {
         self.binding_names.clear();
         self.token_length_names.clear();
+        self.vec_length_names.clear();
         self.names = NameAllocator::default();
         self.next_temp = 0;
         for name in self.function_names.values() {
@@ -108,6 +116,10 @@ impl<'a> Generator<'a> {
                 let name = format!("{}_len", self.binding(id));
                 let name = self.names.allocate(&name);
                 self.token_length_names.insert(id, name);
+            } else if matches!(ty, Type::Vec(_)) {
+                let name = format!("{}_len", self.binding(id));
+                let name = self.names.allocate(&name);
+                self.vec_length_names.insert(id, name);
             }
         }
     }
@@ -160,6 +172,32 @@ impl<'a> Generator<'a> {
                     } else {
                         self.line(&format!("{name}[{index}] = {value};"));
                     }
+                }
+                Statement::VecAssignIndex { id, index, value } => {
+                    // Rust evaluates the right-hand side before the place expression.
+                    let value_text = self.expression(value);
+                    let value_temp = self.temp_name("assigned_value");
+                    self.line(&format!(
+                        "const {} {value_temp} = {value_text};",
+                        c_type(value.ty)
+                    ));
+                    let index_text = self.expression(index);
+                    let index_temp = self.temp_name("index");
+                    self.includes.insert("stddef.h");
+                    self.line(&format!("const size_t {index_temp} = {index_text};"));
+                    let name = self.binding(*id).to_owned();
+                    self.line(&format!("{name}[{index_temp}] = {value_temp};"));
+                }
+                Statement::VecPush { id, value } => {
+                    let value_text = self.expression(value);
+                    let value_temp = self.temp_name("pushed_value");
+                    self.line(&format!(
+                        "const {} {value_temp} = {value_text};",
+                        c_type(value.ty)
+                    ));
+                    let name = self.binding(*id).to_owned();
+                    let length = self.vec_length(*id).to_owned();
+                    self.line(&format!("{name}[{length}++] = {value_temp};"));
                 }
                 Statement::Block(statements) => {
                     self.line("{");
@@ -274,13 +312,45 @@ impl<'a> Generator<'a> {
     fn let_statement(&mut self, id: usize, mutable: bool, value: &Expression) {
         let name = self.binding(id).to_owned();
         match (&value.ty, &value.kind) {
+            (Type::Str, ExpressionKind::StringLiteral(text)) => {
+                self.line(&format!(
+                    "const char *{name} = u8\"{}\";",
+                    escape_readable_string(text, false)
+                ));
+            }
+            (Type::Str, ExpressionKind::Variable(_)) => {
+                let value = self.expression(value);
+                let qualifier = if mutable { "" } else { "const " };
+                self.line(&format!("{qualifier}char *{name} = {value};"));
+            }
             (Type::String, ExpressionKind::StringNew) => {
-                self.line(&format!("char {name}[4097] = \"\";"));
+                self.line(&format!(
+                    "char {name}[{}] = \"\";",
+                    self.string_capacity + 1
+                ));
+            }
+            (Type::String, ExpressionKind::ReadString) => {
+                self.includes.insert("stdio.h");
+                self.line(&format!(
+                    "char {name}[{}] = \"\";",
+                    self.string_capacity + 1
+                ));
+                self.line(&format!("fgets({name}, sizeof({name}), stdin);"));
+            }
+            (Type::String, _) => {
+                self.includes.insert("string.h");
+                let source = self.string_source(value);
+                self.line(&format!(
+                    "char {name}[{}] = \"\";",
+                    self.string_capacity + 1
+                ));
+                self.line(&format!("strcpy({name}, {source});"));
             }
             (Type::Tokens, ExpressionKind::SplitWhitespace(source)) => {
                 self.tokens_let(id, *source);
             }
             (Type::Array(_, _), _) => self.array_let(id, mutable, value),
+            (Type::Vec(_), _) => self.vec_let(id, value),
             (Type::I32, ExpressionKind::ReadI32) => {
                 self.includes.insert("stdio.h");
                 self.line(&format!("int {name};"));
@@ -308,7 +378,25 @@ impl<'a> Generator<'a> {
             self.array_assign(id, value);
             return;
         }
+        if matches!(value.ty, Type::Vec(_)) {
+            self.vec_assign(id, value);
+            return;
+        }
         let name = self.binding(id).to_owned();
+        if value.ty == Type::String {
+            if matches!(value.kind, ExpressionKind::ReadString) {
+                self.includes.insert("stdio.h");
+                self.line(&format!("{name}[0] = '\\0';"));
+                self.line(&format!("fgets({name}, sizeof({name}), stdin);"));
+            } else if matches!(value.kind, ExpressionKind::StringNew) {
+                self.line(&format!("{name}[0] = '\\0';"));
+            } else {
+                self.includes.insert("string.h");
+                let source = self.string_source(value);
+                self.line(&format!("strcpy({name}, {source});"));
+            }
+            return;
+        }
         if let ExpressionKind::Binary(op, left, right) = &value.kind
             && matches!(&left.kind, ExpressionKind::Variable(left_id) if *left_id == id)
             && matches!(
@@ -395,6 +483,18 @@ impl<'a> Generator<'a> {
             }
             return;
         }
+        if parts.iter().any(|part| {
+            matches!(
+                part,
+                crate::ir::PrintPart::Argument {
+                    format: PrintFormat::Debug,
+                    ..
+                }
+            )
+        }) {
+            self.print_with_debug(parts, arguments, newline);
+            return;
+        }
 
         let mut format = String::new();
         let mut values = Vec::new();
@@ -403,7 +503,10 @@ impl<'a> Generator<'a> {
                 crate::ir::PrintPart::Text(text) => {
                     format.push_str(&escape_readable_string(text, true));
                 }
-                crate::ir::PrintPart::Argument { index, precision } => {
+                crate::ir::PrintPart::Argument {
+                    index,
+                    format: style,
+                } => {
                     let argument = &arguments[*index];
                     let value = self.expression(argument);
                     match argument.ty {
@@ -411,13 +514,14 @@ impl<'a> Generator<'a> {
                         Type::Usize => format.push_str("%zu"),
                         Type::Bool => format.push_str("%s"),
                         Type::F64 => {
-                            if let Some(precision) = precision {
+                            if let PrintFormat::Precision(precision) = style {
                                 format.push_str(&format!("%.{precision}f"));
                             } else {
                                 format.push_str("%g");
                             }
                         }
-                        Type::Unit | Type::Array(_, _) | Type::String | Type::Tokens => {
+                        Type::Str | Type::String => format.push_str("%s"),
+                        Type::Unit | Type::Array(_, _) | Type::Vec(_) | Type::Tokens => {
                             unreachable!("print arguments are validated as scalar")
                         }
                     }
@@ -442,6 +546,103 @@ impl<'a> Generator<'a> {
         ));
     }
 
+    fn print_with_debug(
+        &mut self,
+        parts: &[crate::ir::PrintPart],
+        arguments: &[Expression],
+        newline: bool,
+    ) {
+        let mut values = Vec::new();
+        for argument in arguments {
+            if matches!(argument.ty, Type::Array(_, _) | Type::Vec(_) | Type::String) {
+                let ExpressionKind::Variable(id) = &argument.kind else {
+                    unreachable!("aggregate print arguments are validated as bindings")
+                };
+                values.push(self.binding(*id).to_owned());
+                continue;
+            }
+            let value = self.expression(argument);
+            let temp = self.temp_name("printed_value");
+            self.note_type(argument.ty);
+            self.line(&format!("const {} {temp} = {value};", c_type(argument.ty)));
+            values.push(temp);
+        }
+
+        for part in parts {
+            match part {
+                crate::ir::PrintPart::Text(text) if !text.is_empty() => {
+                    self.line(&format!(
+                        "fputs(u8\"{}\", stdout);",
+                        escape_readable_string(text, false)
+                    ));
+                }
+                crate::ir::PrintPart::Argument { index, format } => match format {
+                    PrintFormat::Debug => self.debug_collection(&arguments[*index]),
+                    PrintFormat::Precision(precision) => {
+                        self.line(&format!("printf(\"%.{precision}f\", {});", values[*index]));
+                    }
+                    PrintFormat::Display => match arguments[*index].ty {
+                        Type::I32 => {
+                            self.line(&format!("printf(\"%d\", {});", values[*index]));
+                        }
+                        Type::Usize => {
+                            self.line(&format!("printf(\"%zu\", {});", values[*index]));
+                        }
+                        Type::Bool => self.line(&format!(
+                            "fputs({} ? \"true\" : \"false\", stdout);",
+                            values[*index]
+                        )),
+                        Type::F64 => {
+                            self.line(&format!("printf(\"%g\", {});", values[*index]));
+                        }
+                        Type::Str | Type::String => {
+                            self.line(&format!("fputs({}, stdout);", values[*index]));
+                        }
+                        Type::Unit | Type::Array(_, _) | Type::Vec(_) | Type::Tokens => {
+                            unreachable!("Display arguments are validated as scalar")
+                        }
+                    },
+                },
+                _ => {}
+            }
+        }
+        if newline {
+            self.line("putchar('\\n');");
+        }
+    }
+
+    fn debug_collection(&mut self, argument: &Expression) {
+        let ExpressionKind::Variable(id) = &argument.kind else {
+            unreachable!("Debug collection arguments are validated as bindings")
+        };
+        let name = self.binding(*id).to_owned();
+        let (element, length) = match argument.ty {
+            Type::Array(element, length) => (element, length.to_string()),
+            Type::Vec(element) => (element, self.vec_length(*id).to_owned()),
+            _ => unreachable!("Debug arguments are validated as collections"),
+        };
+        self.includes.insert("stddef.h");
+        self.line("putchar('[');");
+        let index = self.temp_name("index");
+        self.line(&format!(
+            "for (size_t {index} = 0; {index} < {length}; ++{index}) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("if ({index} != 0) {{ fputs(\", \", stdout); }}"));
+        let item = format!("{name}[{index}]");
+        match element {
+            ArrayElement::I32 => self.line(&format!("printf(\"%d\", {item});")),
+            ArrayElement::Usize => self.line(&format!("printf(\"%zu\", {item});")),
+            ArrayElement::Bool => {
+                self.line(&format!("fputs({item} ? \"true\" : \"false\", stdout);"));
+            }
+            ArrayElement::F64 => unreachable!("f64 Debug collection is rejected semantically"),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("putchar(']');");
+    }
+
     fn expression(&mut self, expression: &Expression) -> String {
         match &expression.kind {
             ExpressionKind::Integer(value) => value.to_string(),
@@ -462,6 +663,14 @@ impl<'a> Generator<'a> {
             ExpressionKind::ArrayLength(length) => {
                 self.includes.insert("stddef.h");
                 format!("((size_t){length})")
+            }
+            ExpressionKind::VecIndex { id, index } => {
+                let index = self.expression(index);
+                format!("{}[{index}]", self.binding(*id))
+            }
+            ExpressionKind::VecLength(id) => self.vec_length(*id).to_owned(),
+            ExpressionKind::StringLiteral(value) => {
+                format!("u8\"{}\"", escape_readable_string(value, false))
             }
             ExpressionKind::ReadI32 => self.read_value(Type::I32),
             ExpressionKind::ReadF64 => self.read_value(Type::F64),
@@ -518,7 +727,12 @@ impl<'a> Generator<'a> {
             }
             ExpressionKind::Array(_)
             | ExpressionKind::ArrayRepeat(_, _)
+            | ExpressionKind::Vec(_)
+            | ExpressionKind::VecRepeat(_, _)
+            | ExpressionKind::VecNew
             | ExpressionKind::StringNew
+            | ExpressionKind::StringFrom(_)
+            | ExpressionKind::ReadString
             | ExpressionKind::SplitWhitespace(_) => {
                 unreachable!("aggregate expressions are emitted by their binding statement")
             }
@@ -535,6 +749,14 @@ impl<'a> Generator<'a> {
         };
         self.line(&format!("{c_type} {name};"));
         format!("(scanf(\"{format}\", &{name}), {name})")
+    }
+
+    fn string_source(&mut self, value: &Expression) -> String {
+        match &value.kind {
+            ExpressionKind::StringFrom(source) => self.expression(source),
+            ExpressionKind::Variable(id) => self.binding(*id).to_owned(),
+            _ => unreachable!("owned String sources are validated before generation"),
+        }
     }
 
     fn parse_value(&mut self, ty: Type, source: &ParseSource) -> String {
@@ -559,8 +781,7 @@ impl<'a> Generator<'a> {
         let source = self.binding(source).to_owned();
         let length = self.token_length(id).to_owned();
         let token = self.temp_name("token");
-        // A 4096-byte line can contain at most 2048 non-empty whitespace-separated tokens.
-        self.line(&format!("char *{name}[2049];"));
+        self.line(&format!("char *{name}[{}];", self.vec_capacity));
         self.line(&format!("size_t {length} = 0;"));
         self.line(&format!(
             "for (char *{token} = strtok({source}, \" \\t\\r\\n\\v\\f\"); {token} != NULL; {token} = strtok(NULL, \" \\t\\r\\n\\v\\f\")) {{"
@@ -576,6 +797,105 @@ impl<'a> Generator<'a> {
             .get(&id)
             .map(String::as_str)
             .expect("token length name must be allocated before generation")
+    }
+
+    fn vec_length(&self, id: usize) -> &str {
+        self.vec_length_names
+            .get(&id)
+            .map(String::as_str)
+            .expect("Vec length name must be allocated before generation")
+    }
+
+    fn vec_let(&mut self, id: usize, value: &Expression) {
+        let Type::Vec(element) = value.ty else {
+            unreachable!("vec_let only accepts Vec values")
+        };
+        self.note_type(element.ty());
+        self.includes.insert("stddef.h");
+        let name = self.binding(id).to_owned();
+        let length = self.vec_length(id).to_owned();
+        self.line(&format!(
+            "{} {name}[{}];",
+            c_element_type(element),
+            self.vec_capacity
+        ));
+        self.line(&format!("size_t {length} = 0;"));
+        self.vec_fill(&name, &length, value);
+        self.line(&format!("(void){name};"));
+        self.line(&format!("(void){length};"));
+    }
+
+    fn vec_assign(&mut self, id: usize, value: &Expression) {
+        let Type::Vec(element) = value.ty else {
+            unreachable!("vec_assign only accepts Vec values")
+        };
+        let target = self.binding(id).to_owned();
+        let target_length = self.vec_length(id).to_owned();
+        if matches!(value.kind, ExpressionKind::VecNew) {
+            self.line(&format!("{target_length} = 0;"));
+            return;
+        }
+
+        let temp = self.temp_name("vec_value");
+        let temp_length = self.temp_name("vec_value_len");
+        self.includes.insert("stddef.h");
+        self.line(&format!(
+            "{} {temp}[{}];",
+            c_element_type(element),
+            self.vec_capacity
+        ));
+        self.line(&format!("size_t {temp_length} = 0;"));
+        self.vec_fill(&temp, &temp_length, value);
+        self.line(&format!("{target_length} = {temp_length};"));
+        let index = self.temp_name("copy_index");
+        self.line(&format!(
+            "for (size_t {index} = 0; {index} < {target_length}; ++{index}) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("{target}[{index}] = {temp}[{index}];"));
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn vec_fill(&mut self, target: &str, length: &str, value: &Expression) {
+        match &value.kind {
+            ExpressionKind::VecNew => {}
+            ExpressionKind::Vec(values) => {
+                for value in values {
+                    let value = self.expression(value);
+                    self.line(&format!("{target}[{length}++] = {value};"));
+                }
+            }
+            ExpressionKind::VecRepeat(value, repeat_length) => {
+                let value_text = self.expression(value);
+                let repeated = self.temp_name("repeated_value");
+                self.line(&format!(
+                    "const {} {repeated} = {value_text};",
+                    c_type(value.ty)
+                ));
+                let index = self.temp_name("repeat_index");
+                self.line(&format!(
+                    "for (size_t {index} = 0; {index} < {repeat_length}; ++{index}) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("{target}[{length}++] = {repeated};"));
+                self.indent -= 1;
+                self.line("}");
+            }
+            ExpressionKind::Variable(source) => {
+                let source_name = self.binding(*source).to_owned();
+                let source_length = self.vec_length(*source).to_owned();
+                let index = self.temp_name("copy_index");
+                self.line(&format!(
+                    "for (size_t {index} = 0; {index} < {source_length}; ++{index}) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!("{target}[{length}++] = {source_name}[{index}];"));
+                self.indent -= 1;
+                self.line("}");
+            }
+            _ => unreachable!("Vec values are validated before code generation"),
+        }
     }
 
     fn array_let(&mut self, id: usize, mutable: bool, value: &Expression) {
@@ -670,7 +990,8 @@ impl<'a> Generator<'a> {
                 self.includes.insert("stddef.h");
             }
             Type::Array(element, _) => self.note_type(element.ty()),
-            Type::I32 | Type::F64 | Type::Unit | Type::String | Type::Tokens => {}
+            Type::Vec(element) => self.note_type(element.ty()),
+            Type::I32 | Type::F64 | Type::Unit | Type::Str | Type::String | Type::Tokens => {}
         }
     }
 }
@@ -737,6 +1058,8 @@ fn collect_bindings(statements: &[Statement], bindings: &mut Vec<(usize, String,
             Statement::While { body, .. } => collect_bindings(body, bindings),
             Statement::Assign { .. }
             | Statement::AssignIndex { .. }
+            | Statement::VecAssignIndex { .. }
+            | Statement::VecPush { .. }
             | Statement::Break
             | Statement::Continue
             | Statement::Print { .. }
@@ -752,8 +1075,9 @@ fn c_type(ty: Type) -> &'static str {
         Type::Usize => "size_t",
         Type::F64 => "double",
         Type::Bool => "bool",
+        Type::Str => "const char *",
         Type::Unit => "void",
-        Type::Array(_, _) | Type::String | Type::Tokens => {
+        Type::Array(_, _) | Type::Vec(_) | Type::String | Type::Tokens => {
             unreachable!("aggregate values need declaration-specific C syntax")
         }
     }
@@ -814,8 +1138,11 @@ fn expression_needs_prelude(expression: &Expression) -> bool {
         ExpressionKind::ReadI32
         | ExpressionKind::ReadF64
         | ExpressionKind::FlushStdout
+        | ExpressionKind::ReadString
         | ExpressionKind::ReadLine(_) => true,
-        ExpressionKind::Index { index, .. } => expression_needs_prelude(index),
+        ExpressionKind::Index { index, .. } | ExpressionKind::VecIndex { index, .. } => {
+            expression_needs_prelude(index)
+        }
         ExpressionKind::Parse {
             source: ParseSource::Token { index, .. },
         } => expression_needs_prelude(index),
@@ -824,17 +1151,23 @@ fn expression_needs_prelude(expression: &Expression) -> bool {
         ExpressionKind::Binary(_, left, right) => {
             expression_needs_prelude(left) || expression_needs_prelude(right)
         }
-        ExpressionKind::Call(_, arguments) | ExpressionKind::Array(arguments) => {
-            arguments.iter().any(expression_needs_prelude)
+        ExpressionKind::Call(_, arguments)
+        | ExpressionKind::Array(arguments)
+        | ExpressionKind::Vec(arguments) => arguments.iter().any(expression_needs_prelude),
+        ExpressionKind::ArrayRepeat(value, _) | ExpressionKind::VecRepeat(value, _) => {
+            expression_needs_prelude(value)
         }
-        ExpressionKind::ArrayRepeat(value, _) => expression_needs_prelude(value),
         ExpressionKind::Integer(_)
         | ExpressionKind::Usize(_)
         | ExpressionKind::Float(_)
         | ExpressionKind::Boolean(_)
         | ExpressionKind::Variable(_)
         | ExpressionKind::ArrayLength(_)
+        | ExpressionKind::VecNew
+        | ExpressionKind::VecLength(_)
+        | ExpressionKind::StringLiteral(_)
         | ExpressionKind::StringNew
+        | ExpressionKind::StringFrom(_)
         | ExpressionKind::SplitWhitespace(_)
         | ExpressionKind::TokensLength(_)
         | ExpressionKind::Parse {

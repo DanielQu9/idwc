@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
-use syn::{BinOp, Expr, Lit, Pat, Stmt, UnOp, ext::IdentExt, spanned::Spanned};
+use syn::{
+    BinOp, Expr, Lit, Pat, Stmt, Token, UnOp,
+    ext::IdentExt,
+    parse::{Parse, ParseStream},
+    spanned::Spanned,
+};
 
 use crate::{
     TranspileError, TranspileErrorKind,
     ir::{
         ArrayElement, BinaryOp, Expression, ExpressionKind, Function, Parameter, ParseSource,
-        Program, Statement, Type, UnaryOp,
+        PrintFormat, Program, Statement, Type, UnaryOp,
     },
 };
 
@@ -17,6 +22,7 @@ struct Binding {
     ty: Type,
     mutable: bool,
     source: Option<usize>,
+    moved: bool,
 }
 
 /// 以 scope 堆疊解析名稱，並在降低 AST 時檢查型別與可變性。
@@ -33,6 +39,40 @@ struct Callable {
     id: usize,
     parameters: Vec<Type>,
     return_type: Type,
+}
+
+enum VecMacroInput {
+    Elements(Vec<Expr>),
+    Repeat(Box<Expr>, syn::LitInt),
+}
+
+impl Parse for VecMacroInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(Self::Elements(Vec::new()));
+        }
+        let first: Expr = input.parse()?;
+        if input.peek(Token![;]) {
+            input.parse::<Token![;]>()?;
+            let length = input.parse()?;
+            if !input.is_empty() {
+                return Err(input.error("vec![value; N] 後不可有其他 token"));
+            }
+            return Ok(Self::Repeat(Box::new(first), length));
+        }
+        let mut values = vec![first];
+        while input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            values.push(input.parse()?);
+        }
+        if !input.is_empty() {
+            return Err(input.error("vec! 元素必須以逗號分隔"));
+        }
+        Ok(Self::Elements(values))
+    }
 }
 
 /// 先註冊所有函式簽名，再以獨立 scope 分析各函式主體。
@@ -114,6 +154,7 @@ pub(crate) fn analyze(items: &[&syn::ItemFn]) -> Result<Program, TranspileError>
                 ty: *ty,
                 mutable: ident.mutability.is_some(),
                 source: None,
+                moved: false,
             };
             analyzer.next_id += 1;
             if analyzer.scopes[0].insert(name.clone(), binding).is_some() {
@@ -260,22 +301,36 @@ impl Analyzer<'_> {
                 same_type(Type::Unit, value.ty)?;
                 Ok(Statement::Evaluate(value))
             }
+            Stmt::Expr(Expr::MethodCall(call), _)
+                if call.attrs.is_empty() && call.method == "push" =>
+            {
+                self.vec_push(call)
+            }
             Stmt::Expr(Expr::Assign(assign), _) if assign.attrs.is_empty() => {
                 if let Expr::Index(index) = assign.left.as_ref() {
-                    let (binding, index, element) = self.array_index(index, true)?;
+                    let (binding, index, element, length) = self.index_target(index, true)?;
                     let value = self.expression_expected(&assign.right, element.ty())?;
-                    return Ok(Statement::AssignIndex {
-                        id: binding.id,
-                        length: array_parts(binding.ty).expect("陣列 target 已驗證").1,
-                        index,
-                        value,
-                        op: None,
+                    return Ok(if let Some(length) = length {
+                        Statement::AssignIndex {
+                            id: binding.id,
+                            length,
+                            index,
+                            value,
+                            op: None,
+                        }
+                    } else {
+                        Statement::VecAssignIndex {
+                            id: binding.id,
+                            index,
+                            value,
+                        }
                     });
                 }
                 let binding = self.assignment_target(&assign.left)?;
                 require_assignable(binding.ty)?;
                 let value = self.expression_expected(&assign.right, binding.ty)?;
                 same_type(binding.ty, value.ty)?;
+                self.prepare_assignment(binding, &value)?;
                 Ok(Statement::Assign {
                     id: binding.id,
                     value,
@@ -292,12 +347,15 @@ impl Analyzer<'_> {
                 };
                 if let Some(op) = op {
                     if let Expr::Index(index) = binary.left.as_ref() {
-                        let (binding, index, element) = self.array_index(index, true)?;
+                        let (binding, index, element, length) = self.index_target(index, true)?;
                         let right = self.expression_expected(&binary.right, element.ty())?;
                         validate_binary_types(op, element.ty(), right.ty)?;
+                        if length.is_none() {
+                            return Err(TranspileError::unsupported("Vec 索引暫不支援複合賦值"));
+                        }
                         return Ok(Statement::AssignIndex {
                             id: binding.id,
-                            length: array_parts(binding.ty).expect("陣列 target 已驗證").1,
+                            length: length.expect("Vec 已在前面拒絕"),
                             index,
                             value: right,
                             op: Some(op),
@@ -336,7 +394,10 @@ impl Analyzer<'_> {
     /// 分別分析分支 scope；else if 延後到 else 路徑才求值。
     fn branch(&mut self, branch: &syn::ExprIf) -> Result<Statement, TranspileError> {
         let condition = self.condition(&branch.cond)?;
+        let before = self.moved_state();
         let then_branch = self.block(&branch.then_branch)?;
+        let then_state = self.moved_state();
+        self.restore_moved_state(&before);
         let else_branch = match &branch.else_branch {
             None => None,
             Some((_, expr)) => match expr.as_ref() {
@@ -351,6 +412,8 @@ impl Analyzer<'_> {
                 }
             },
         };
+        let else_state = self.moved_state();
+        self.merge_moved_states(&then_state, &else_state);
         Ok(Statement::If {
             condition,
             then_branch,
@@ -360,9 +423,12 @@ impl Analyzer<'_> {
 
     /// 在迴圈主體內允許跳躍；無論分析成功或失敗都恢復外層深度。
     fn loop_body(&mut self, block: &syn::Block) -> Result<Vec<Statement>, TranspileError> {
+        let before = self.moved_state();
         self.loop_depth += 1;
         let result = self.block(block);
         self.loop_depth -= 1;
+        let after = self.moved_state();
+        self.merge_moved_states(&before, &after);
         result
     }
 
@@ -400,8 +466,10 @@ impl Analyzer<'_> {
             ty: start.ty,
             mutable: ident.mutability.is_some(),
             source: None,
+            moved: false,
         };
         self.next_id += 1;
+        let before = self.moved_state();
         self.loop_depth += 1;
         self.scopes.push(HashMap::new());
         self.scopes
@@ -416,6 +484,8 @@ impl Analyzer<'_> {
             .collect::<Result<Vec<_>, _>>();
         self.scopes.pop();
         self.loop_depth -= 1;
+        let after = self.moved_state();
+        self.merge_moved_states(&before, &after);
         Ok(Statement::ForRange {
             id: binding.id,
             name,
@@ -440,7 +510,10 @@ impl Analyzer<'_> {
     fn evaluate_statement(&self, statement: &Stmt) -> Result<Statement, TranspileError> {
         if let Stmt::Expr(expr, Some(_)) = statement {
             let expression = self.expression(expr)?;
-            if matches!(expression.ty, Type::String | Type::Tokens) {
+            if matches!(
+                expression.ty,
+                Type::Str | Type::String | Type::Vec(_) | Type::Tokens
+            ) {
                 return Err(TranspileError::unsupported(
                     "String 與 token collection 僅能用於限定的輸入流程",
                 ));
@@ -478,11 +551,35 @@ impl Analyzer<'_> {
             same_type(annotation, value.ty)?;
         }
         let source = match (&value.ty, &value.kind) {
-            (Type::String, ExpressionKind::StringNew) => None,
+            (
+                Type::String,
+                ExpressionKind::StringNew
+                | ExpressionKind::ReadString
+                | ExpressionKind::StringFrom(_)
+                | ExpressionKind::Variable(_),
+            )
+            | (Type::Str, ExpressionKind::StringLiteral(_) | ExpressionKind::Variable(_)) => None,
+            (
+                Type::Vec(_),
+                ExpressionKind::Vec(_)
+                | ExpressionKind::VecRepeat(_, _)
+                | ExpressionKind::VecNew
+                | ExpressionKind::Variable(_),
+            ) => None,
             (Type::Tokens, ExpressionKind::SplitWhitespace(source)) => Some(*source),
             (Type::String, _) => {
                 return Err(TranspileError::unsupported(
-                    "String binding 僅接受 String::new() 初始化",
+                    "String binding 僅接受建立、讀取或 move 初始化",
+                ));
+            }
+            (Type::Str, _) => {
+                return Err(TranspileError::unsupported(
+                    "&str binding 僅接受字串字面量或另一個 &str",
+                ));
+            }
+            (Type::Vec(_), _) => {
+                return Err(TranspileError::unsupported(
+                    "Vec binding 僅接受 Vec::new()、vec! 或 move 初始化",
                 ));
             }
             (Type::Tokens, _) => {
@@ -497,7 +594,9 @@ impl Analyzer<'_> {
             ty: value.ty,
             mutable: ident.mutability.is_some(),
             source,
+            moved: false,
         };
+        self.prepare_move(&value, None)?;
         self.next_id += 1;
         // local 僅由 block 呼叫；此時堆疊必定包含目前區塊。
         let scope_index = self.scopes.len() - 1;
@@ -518,16 +617,31 @@ impl Analyzer<'_> {
             .iter()
             .map(|expr| self.expression(expr))
             .collect::<Result<Vec<_>, _>>()?;
-        for argument in &arguments {
-            require_scalar(argument.ty)?;
-        }
         for part in &parts {
-            if let crate::ir::PrintPart::Argument {
-                index,
-                precision: Some(_),
-            } = part
-            {
-                same_type(Type::F64, arguments[*index].ty)?;
+            let crate::ir::PrintPart::Argument { index, format } = part else {
+                continue;
+            };
+            let argument = &arguments[*index];
+            match format {
+                PrintFormat::Display => {
+                    require_printable(argument.ty)?;
+                    if argument.ty == Type::String
+                        && !matches!(argument.kind, ExpressionKind::Variable(_))
+                    {
+                        return Err(TranspileError::unsupported(
+                            "owned String 格式參數目前必須是 binding",
+                        ));
+                    }
+                }
+                PrintFormat::Precision(_) => same_type(Type::F64, argument.ty)?,
+                PrintFormat::Debug => {
+                    require_debug_collection(argument.ty)?;
+                    if !matches!(argument.kind, ExpressionKind::Variable(_)) {
+                        return Err(TranspileError::unsupported(
+                            "{:?} 目前僅接受固定陣列或 Vec binding",
+                        ));
+                    }
+                }
             }
         }
         Ok(Statement::Print {
@@ -539,6 +653,14 @@ impl Analyzer<'_> {
 
     /// 從內向外查詢識別字；不接受限定路徑或泛型參數。
     fn resolve(&self, expr: &Expr) -> Result<Binding, TranspileError> {
+        let binding = self.resolve_raw(expr)?;
+        if binding.moved {
+            return Err(TranspileError::semantic("使用已 moved 的 String 或 Vec"));
+        }
+        Ok(binding)
+    }
+
+    fn resolve_raw(&self, expr: &Expr) -> Result<Binding, TranspileError> {
         let Expr::Path(path) = expr else {
             return Err(TranspileError::unsupported("變數必須是單一識別字"));
         };
@@ -559,11 +681,96 @@ impl Analyzer<'_> {
 
     /// 賦值只能寫入先前宣告的可變 binding。
     fn assignment_target(&self, expr: &Expr) -> Result<Binding, TranspileError> {
-        let binding = self.resolve(expr)?;
+        let binding = self.resolve_raw(expr)?;
         if !binding.mutable {
             return Err(TranspileError::semantic("不能賦值給不可變 binding"));
         }
         Ok(binding)
+    }
+
+    fn prepare_assignment(
+        &mut self,
+        target: Binding,
+        value: &Expression,
+    ) -> Result<(), TranspileError> {
+        if matches!(target.ty, Type::String | Type::Vec(_)) {
+            if target.ty == Type::String {
+                self.ensure_not_borrowed(target.id)?;
+            }
+            self.prepare_move(value, Some(target.id))?;
+            self.set_moved(target.id, false);
+        }
+        Ok(())
+    }
+
+    fn prepare_move(
+        &mut self,
+        value: &Expression,
+        target: Option<usize>,
+    ) -> Result<(), TranspileError> {
+        if matches!(value.ty, Type::String | Type::Vec(_))
+            && let ExpressionKind::Variable(source) = &value.kind
+        {
+            if target == Some(*source) {
+                return Err(TranspileError::semantic(
+                    "不能將 String 或 Vec move 回同一個 binding",
+                ));
+            }
+            if value.ty == Type::String {
+                self.ensure_not_borrowed(*source)?;
+            }
+            self.set_moved(*source, true);
+        }
+        Ok(())
+    }
+
+    fn ensure_not_borrowed(&self, id: usize) -> Result<(), TranspileError> {
+        if self
+            .scopes
+            .iter()
+            .any(|scope| scope.values().any(|candidate| candidate.source == Some(id)))
+        {
+            return Err(TranspileError::semantic(
+                "token collection 存活期間不能 move 或修改來源 String",
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_moved(&mut self, id: usize, moved: bool) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.values_mut().find(|binding| binding.id == id) {
+                binding.moved = moved;
+                return;
+            }
+        }
+        unreachable!("binding id must remain in scope while it is updated")
+    }
+
+    fn moved_state(&self) -> HashMap<usize, bool> {
+        self.scopes
+            .iter()
+            .flat_map(|scope| scope.values().map(|binding| (binding.id, binding.moved)))
+            .collect()
+    }
+
+    fn restore_moved_state(&mut self, state: &HashMap<usize, bool>) {
+        for scope in &mut self.scopes {
+            for binding in scope.values_mut() {
+                if let Some(moved) = state.get(&binding.id) {
+                    binding.moved = *moved;
+                }
+            }
+        }
+    }
+
+    fn merge_moved_states(&mut self, first: &HashMap<usize, bool>, second: &HashMap<usize, bool>) {
+        for scope in &mut self.scopes {
+            for binding in scope.values_mut() {
+                binding.moved = first.get(&binding.id).copied().unwrap_or(binding.moved)
+                    || second.get(&binding.id).copied().unwrap_or(binding.moved);
+            }
+        }
     }
 
     /// 遞迴檢查值運算式；所有未列出的 AST 與屬性皆拒絕。
@@ -579,16 +786,25 @@ impl Analyzer<'_> {
             Expr::Array(array) if array.attrs.is_empty() => self.array_literal(array, None),
             Expr::Repeat(repeat) if repeat.attrs.is_empty() => self.array_repeat(repeat, None),
             Expr::Index(index) if index.attrs.is_empty() => {
-                let (binding, index, element) = self.array_index(index, false)?;
-                let (_, length) = array_parts(binding.ty).expect("陣列 access 已驗證");
+                let (binding, index, element, length) = self.index_target(index, false)?;
                 Ok(Expression {
                     ty: element.ty(),
-                    kind: ExpressionKind::Index {
-                        id: binding.id,
-                        length,
-                        index: Box::new(index),
+                    kind: if let Some(length) = length {
+                        ExpressionKind::Index {
+                            id: binding.id,
+                            length,
+                            index: Box::new(index),
+                        }
+                    } else {
+                        ExpressionKind::VecIndex {
+                            id: binding.id,
+                            index: Box::new(index),
+                        }
                     },
                 })
+            }
+            Expr::Macro(mac) if mac.attrs.is_empty() && mac.mac.path.is_ident("vec") => {
+                self.vec_macro(&mac.mac, None)
             }
             Expr::MethodCall(call) if call.attrs.is_empty() => self.method_call(call),
             Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
@@ -624,7 +840,11 @@ impl Analyzer<'_> {
                     ty: Type::Bool,
                     kind: ExpressionKind::Boolean(boolean.value),
                 }),
-                _ => Err(TranspileError::unsupported("值僅接受 i32 與 bool 字面量")),
+                Lit::Str(string) => Ok(Expression {
+                    ty: Type::Str,
+                    kind: ExpressionKind::StringLiteral(string.value()),
+                }),
+                _ => Err(TranspileError::unsupported("不支援此字面量型別")),
             },
             Expr::Path(_) => {
                 let binding = self.resolve(expr)?;
@@ -699,6 +919,23 @@ impl Analyzer<'_> {
         expr: &Expr,
         expected: Type,
     ) -> Result<Expression, TranspileError> {
+        if let Type::Vec(element) = expected {
+            if let Expr::Macro(mac) = expr
+                && mac.attrs.is_empty()
+                && mac.mac.path.is_ident("vec")
+            {
+                return self.vec_macro(&mac.mac, Some(element));
+            }
+            if let Expr::Call(call) = expr
+                && call.attrs.is_empty()
+                && is_vec_new_call(call)
+            {
+                return Ok(Expression {
+                    ty: expected,
+                    kind: ExpressionKind::VecNew,
+                });
+            }
+        }
         if expected == Type::Tokens
             && let Expr::MethodCall(call) = expr
             && call.attrs.is_empty()
@@ -817,19 +1054,119 @@ impl Analyzer<'_> {
         })
     }
 
-    fn array_index(
+    fn index_target(
         &self,
         index: &syn::ExprIndex,
         mutable: bool,
-    ) -> Result<(Binding, Expression, ArrayElement), TranspileError> {
+    ) -> Result<(Binding, Expression, ArrayElement, Option<usize>), TranspileError> {
         let binding = self.resolve(&index.expr)?;
-        let (element, _) =
-            array_parts(binding.ty).ok_or(TranspileError::semantic("只能索引固定陣列"))?;
+        let (element, length) = match binding.ty {
+            Type::Array(element, length) => (element, Some(length)),
+            Type::Vec(element) => (element, None),
+            _ => return Err(TranspileError::semantic("只能索引固定陣列或 Vec")),
+        };
         if mutable && !binding.mutable {
-            return Err(TranspileError::semantic("不能修改不可變陣列"));
+            return Err(TranspileError::semantic("不能修改不可變陣列或 Vec"));
         }
         let index = self.expression_expected(&index.index, Type::Usize)?;
-        Ok((binding, index, element))
+        Ok((binding, index, element, length))
+    }
+
+    fn vec_push(&self, call: &syn::ExprMethodCall) -> Result<Statement, TranspileError> {
+        if call.turbofish.is_some() || call.args.len() != 1 {
+            return Err(TranspileError::unsupported("Vec::push() 必須接受一個值"));
+        }
+        let binding = self.resolve(&call.receiver)?;
+        let Type::Vec(element) = binding.ty else {
+            return Err(TranspileError::semantic("push() 僅支援 Vec binding"));
+        };
+        if !binding.mutable {
+            return Err(TranspileError::semantic("push() 需要可變的 Vec binding"));
+        }
+        let value = self.expression_expected(&call.args[0], element.ty())?;
+        Ok(Statement::VecPush {
+            id: binding.id,
+            value,
+        })
+    }
+
+    fn vec_macro(
+        &self,
+        mac: &syn::Macro,
+        expected: Option<ArrayElement>,
+    ) -> Result<Expression, TranspileError> {
+        let input = syn::parse2::<VecMacroInput>(mac.tokens.clone())
+            .map_err(|error| TranspileError::unsupported(error.to_string()))?;
+        match input {
+            VecMacroInput::Elements(elements) => {
+                if elements.len() > crate::MAX_COLLECTION_CAPACITY {
+                    return Err(TranspileError::unsupported(format!(
+                        "vec! 元素數量上限為 {}",
+                        crate::MAX_COLLECTION_CAPACITY
+                    )));
+                }
+                let mut element = if expected.is_some() {
+                    expected
+                } else {
+                    elements
+                        .iter()
+                        .find(|expr| !is_unsuffixed_integer(expr))
+                        .map(|expr| self.expression(expr))
+                        .transpose()?
+                        .map(|value| scalar_element(value.ty))
+                        .transpose()?
+                };
+                let mut values = Vec::new();
+                for expr in elements {
+                    let value = if let Some(element) = element {
+                        self.expression_expected(&expr, element.ty())?
+                    } else {
+                        self.expression(&expr)?
+                    };
+                    let actual = scalar_element(value.ty)?;
+                    if let Some(element) = element {
+                        same_type(element.ty(), value.ty)?;
+                    } else {
+                        element = Some(actual);
+                    }
+                    values.push(value);
+                }
+                let element = element.ok_or(TranspileError::unsupported(
+                    "空 vec![] 需要 Vec<T> 型別註記",
+                ))?;
+                Ok(Expression {
+                    ty: Type::Vec(element),
+                    kind: ExpressionKind::Vec(values),
+                })
+            }
+            VecMacroInput::Repeat(expr, length) => {
+                if !length.suffix().is_empty() {
+                    return Err(TranspileError::unsupported(
+                        "vec![value; N] 的 N 僅接受無後綴整數字面量",
+                    ));
+                }
+                let length = usize_value(&length)?;
+                if length > crate::MAX_COLLECTION_CAPACITY {
+                    return Err(TranspileError::unsupported(format!(
+                        "vec! repeat 長度上限為 {}",
+                        crate::MAX_COLLECTION_CAPACITY
+                    )));
+                }
+                let value = if let Some(element) = expected {
+                    self.expression_expected(&expr, element.ty())?
+                } else {
+                    self.expression(&expr)?
+                };
+                let element = scalar_element(value.ty)?;
+                if let Some(expected) = expected {
+                    same_type(expected.ty(), value.ty)?;
+                }
+                Ok(Expression {
+                    ty: Type::Vec(element),
+                    kind: ExpressionKind::VecRepeat(Box::new(value), length),
+                })
+            }
+        }
     }
 
     fn method_call(&self, call: &syn::ExprMethodCall) -> Result<Expression, TranspileError> {
@@ -880,8 +1217,12 @@ impl Analyzer<'_> {
                     ty: Type::Usize,
                     kind: ExpressionKind::TokensLength(binding.id),
                 }),
+                Type::Vec(_) => Ok(Expression {
+                    ty: Type::Usize,
+                    kind: ExpressionKind::VecLength(binding.id),
+                }),
                 _ => Err(TranspileError::semantic(
-                    "len() 目前僅支援固定陣列或 token collection",
+                    "len() 目前僅支援固定陣列、Vec 或 token collection",
                 )),
             };
         }
@@ -1041,6 +1382,24 @@ impl Analyzer<'_> {
                 kind: ExpressionKind::StringNew,
             });
         }
+        if segments == ["Vec", "new"] {
+            return Err(TranspileError::unsupported(
+                "Vec::new() 需要 Vec<T> 型別註記",
+            ));
+        }
+        if segments == ["String", "from"] {
+            if call.args.len() != 1 {
+                return Err(TranspileError::semantic(
+                    "String::from() 必須接受一個 &str 引數",
+                ));
+            }
+            let value = self.expression(&call.args[0])?;
+            same_type(Type::Str, value.ty)?;
+            return Ok(Expression {
+                ty: Type::String,
+                kind: ExpressionKind::StringFrom(Box::new(value)),
+            });
+        }
         if segments.len() == 3 && segments[0] == "idwc" && segments[1] == "io" {
             if !call.args.is_empty() {
                 return Err(TranspileError::semantic("內建 I/O 不接受引數"));
@@ -1053,6 +1412,10 @@ impl Analyzer<'_> {
                 "read_f64" => Ok(Expression {
                     ty: Type::F64,
                     kind: ExpressionKind::ReadF64,
+                }),
+                "read_line" => Ok(Expression {
+                    ty: Type::String,
+                    kind: ExpressionKind::ReadString,
                 }),
                 "flush_stdout" => Ok(Expression {
                     ty: Type::Unit,
@@ -1212,6 +1575,52 @@ fn token_vec_type(ty: &syn::Type) -> bool {
     )
 }
 
+fn scalar_vec_element(ty: &syn::Type) -> Result<Option<ArrayElement>, TranspileError> {
+    let syn::Type::Path(path) = ty else {
+        return Ok(None);
+    };
+    if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 1 {
+        return Ok(None);
+    }
+    let segment = &path.path.segments[0];
+    if segment.ident != "Vec" {
+        return Ok(None);
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Err(TranspileError::unsupported(
+            "Vec 必須明確指定一個 scalar 元素型別",
+        ));
+    };
+    let mut args = arguments.args.iter();
+    let Some(syn::GenericArgument::Type(element)) = args.next() else {
+        return Err(TranspileError::unsupported(
+            "Vec 必須明確指定一個 scalar 元素型別",
+        ));
+    };
+    if args.next().is_some() {
+        return Err(TranspileError::unsupported("Vec 僅接受一個元素型別"));
+    }
+    Ok(Some(scalar_element(parse_type(element)?)?))
+}
+
+fn is_vec_new_call(call: &syn::ExprCall) -> bool {
+    let Expr::Path(path) = call.func.as_ref() else {
+        return false;
+    };
+    path.attrs.is_empty()
+        && path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 2
+        && path.path.segments[0].ident == "Vec"
+        && path.path.segments[1].ident == "new"
+        && path
+            .path
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.arguments, syn::PathArguments::None))
+        && call.args.is_empty()
+}
+
 /// 型別註記接受未限定路徑的基本型別，以及函式的 unit 回傳型別。
 fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
     if let syn::Type::Tuple(tuple) = ty
@@ -1240,13 +1649,26 @@ fn parse_type(ty: &syn::Type) -> Result<Type, TranspileError> {
         if token_vec_type(ty) {
             return Ok(Type::Tokens);
         }
+        if let Some(element) = scalar_vec_element(ty)? {
+            return Ok(Type::Vec(element));
+        }
+    }
+    if let syn::Type::Reference(reference) = ty
+        && reference.mutability.is_none()
+        && reference.lifetime.is_none()
+        && matches!(
+            reference.elem.as_ref(),
+            syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("str")
+        )
+    {
+        return Ok(Type::Str);
     }
     if let syn::Type::Array(array) = ty {
         let element = scalar_element(parse_type(&array.elem)?)?;
         return Ok(Type::Array(element, array_length(&array.len)?));
     }
     Err(TranspileError::unsupported(
-        "型別僅接受 scalar、一維固定陣列、限定 String／Vec<&str> 與 unit 回傳型別",
+        "型別僅接受 scalar、一維固定陣列、限定 String／Vec 與 unit 回傳型別",
     ))
 }
 
@@ -1345,23 +1767,51 @@ fn require_scalar(ty: Type) -> Result<(), TranspileError> {
     Ok(())
 }
 
-fn require_assignable(ty: Type) -> Result<(), TranspileError> {
-    if matches!(ty, Type::String | Type::Tokens | Type::Unit) {
+fn require_printable(ty: Type) -> Result<(), TranspileError> {
+    if !matches!(
+        ty,
+        Type::I32 | Type::Usize | Type::F64 | Type::Bool | Type::Str | Type::String
+    ) {
         return Err(TranspileError::unsupported(
-            "String 與 token collection 不支援一般賦值",
+            "格式參數僅接受 scalar、&str 或 String",
+        ));
+    }
+    Ok(())
+}
+
+fn require_debug_collection(ty: Type) -> Result<(), TranspileError> {
+    match ty {
+        Type::Array(element, _) | Type::Vec(element) if element != ArrayElement::F64 => Ok(()),
+        Type::Array(ArrayElement::F64, _) | Type::Vec(ArrayElement::F64) => Err(
+            TranspileError::unsupported("f64 collection 的 {:?} 格式尚未支援"),
+        ),
+        _ => Err(TranspileError::unsupported(
+            "{:?} 目前僅支援 i32、usize 或 bool 的固定陣列與 Vec",
+        )),
+    }
+}
+
+fn require_assignable(ty: Type) -> Result<(), TranspileError> {
+    if matches!(ty, Type::Tokens | Type::Unit) {
+        return Err(TranspileError::unsupported(
+            "token collection 不支援一般賦值",
         ));
     }
     Ok(())
 }
 
 fn require_parameter_type(ty: Type) -> Result<(), TranspileError> {
-    require_scalar(ty).map_err(|_| TranspileError::unsupported("函式參數暫不支援陣列或 unit"))
+    require_scalar(ty)
+        .map_err(|_| TranspileError::unsupported("函式參數暫不支援陣列、字串、collection 或 unit"))
 }
 
 fn require_return_type(ty: Type) -> Result<(), TranspileError> {
-    if matches!(ty, Type::Array(_, _) | Type::String | Type::Tokens) {
+    if matches!(
+        ty,
+        Type::Array(_, _) | Type::Vec(_) | Type::Str | Type::String | Type::Tokens
+    ) {
         return Err(TranspileError::unsupported(
-            "函式回傳值暫不支援陣列、String 或 Vec<&str>",
+            "函式回傳值暫不支援陣列、&str、String 或 Vec",
         ));
     }
     Ok(())
@@ -1380,9 +1830,11 @@ fn scalar_element(ty: Type) -> Result<ArrayElement, TranspileError> {
         Type::Usize => Ok(ArrayElement::Usize),
         Type::F64 => Ok(ArrayElement::F64),
         Type::Bool => Ok(ArrayElement::Bool),
-        Type::Unit | Type::Array(_, _) | Type::String | Type::Tokens => Err(
-            TranspileError::unsupported("固定陣列元素僅接受 i32、usize、f64 或 bool"),
-        ),
+        Type::Unit | Type::Array(_, _) | Type::Vec(_) | Type::Str | Type::String | Type::Tokens => {
+            Err(TranspileError::unsupported(
+                "陣列與 Vec 元素僅接受 i32、usize、f64 或 bool",
+            ))
+        }
     }
 }
 

@@ -26,6 +26,39 @@ fn explicit_strict_mode_matches_transpile() {
     );
 }
 
+#[test]
+fn collection_capacities_are_configurable() {
+    let source = "fn main() { let input = idwc::io::read_line(); let values: Vec<&str> = input.split_whitespace().collect(); println!(\"{}\", values.len()); }";
+    let options = TranspileOptions::default()
+        .with_string_capacity(8)
+        .with_vec_capacity(3);
+    let strict = transpile_with_options(source, options).unwrap();
+    assert!(strict.contains("#define IDWC_LINE_LIMIT ((size_t)8)"));
+    assert!(strict.contains("#define IDWC_TOKEN_LIMIT ((size_t)3)"));
+    assert!(strict.contains("unsigned char data[8];"));
+    assert!(strict.contains("size_t start[3];"));
+
+    let options = TranspileOptions::new(TranspileMode::Stupid)
+        .with_string_capacity(8)
+        .with_vec_capacity(3);
+    let relaxed = transpile_with_options(source, options).unwrap();
+    assert!(relaxed.contains("char input[9] = \"\";"));
+    assert!(relaxed.contains("char *values[3];"));
+}
+
+#[test]
+fn rejects_invalid_collection_capacities() {
+    for options in [
+        TranspileOptions::default().with_string_capacity(0),
+        TranspileOptions::default().with_string_capacity(65_537),
+        TranspileOptions::default().with_vec_capacity(0),
+        TranspileOptions::default().with_vec_capacity(65_537),
+    ] {
+        let error = transpile_with_options("fn main() {}", options).unwrap_err();
+        assert_eq!(error.kind(), TranspileErrorKind::Configuration);
+    }
+}
+
 /// Stupid Mode keeps readable UTF-8 and source names without strict runtime machinery.
 #[test]
 fn stupid_mode_generates_readable_c() {
@@ -110,6 +143,14 @@ fn checked_in_c_examples_match_generated_output() {
         (
             include_str!("../examples/ranges.rs"),
             include_str!("../examples/ranges.c"),
+        ),
+        (
+            include_str!("../examples/strings.rs"),
+            include_str!("../examples/strings.c"),
+        ),
+        (
+            include_str!("../examples/vectors.rs"),
+            include_str!("../examples/vectors.c"),
         ),
     ] {
         assert_eq!(transpile(rust).unwrap(), c);
@@ -262,7 +303,6 @@ fn rejects_features_outside_v0_8() {
         "fn main() { let x = 1u32; }",
         "fn main() { let x = 1.0f32; }",
         "fn main() { let x = 'a'; }",
-        r#"fn main() { let x = "text"; }"#,
         "fn main() { let x = 1 << 2; }",
         "fn main() { let x = 1 & 2; }",
         "fn main() { let x = 1 | 2; }",
@@ -289,7 +329,6 @@ fn rejects_features_outside_v0_8() {
         r#"fn main() { println!("{0}", 1); }"#,
         r#"fn main() { println!("{:?}", 1); }"#,
         r#"fn main() { println!("{:04}", 1); }"#,
-        r#"fn main() { println!("{}", "text"); }"#,
         r#"fn main() { println!("{}", (1, 2)); }"#,
         r#"fn main() { println!("{}", 1, 2); }"#,
         r#"fn main() { let x = 1; println!("{}", x = 2); }"#,
@@ -699,11 +738,93 @@ fn rejects_array_forms_outside_v0_6() {
     }
 }
 
+#[test]
+fn accepts_fixed_capacity_vec_values() {
+    for source in [
+        include_str!("../examples/vectors.rs"),
+        "fn main() { let a = vec![1, 2usize, 3]; let b = a; println!(\"{} {}\", b[1], b.len()); }",
+        "fn main() { let mut a: Vec<bool> = vec![]; a.push(true); a[0] = false; println!(\"{}\", a[0]); }",
+        "fn main() { let mut a: Vec<f64> = Vec::new(); a.push(1.5); a = vec![2.5; 2]; println!(\"{} {}\", a.len(), a[1]); }",
+        "fn main() { let mut a = vec![1]; let b = vec![2]; a = b; println!(\"{}\", a[0]); }",
+        "fn main() { let a = [1usize, 2, 3]; let b = vec![true, false]; println!(\"{:?} {:?}\", a, b); }",
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn vec_codegen_uses_each_mode_capacity_contract() {
+    let source = "fn main() { let mut values = vec![1, 2]; values.push(3); println!(\"{} {}\", values.len(), values[2]); }";
+    let strict =
+        transpile_with_options(source, TranspileOptions::default().with_vec_capacity(3)).unwrap();
+    assert!(strict.contains("#define IDWC_VEC_LIMIT ((size_t)3)"));
+    assert!(strict.contains("int32_t data[3];"));
+    assert!(strict.contains("idwc_vec_require_capacity"));
+    assert!(strict.contains("idwc_vec_index"));
+
+    let relaxed = transpile_with_options(
+        source,
+        TranspileOptions::new(TranspileMode::Stupid).with_vec_capacity(3),
+    )
+    .unwrap();
+    assert!(relaxed.contains("int values[3];"));
+    assert!(relaxed.contains("size_t values_len = 0;"));
+    assert!(relaxed.contains("values[values_len++]"));
+    assert!(!relaxed.contains("struct "));
+    assert!(!relaxed.contains("idwc_vec_"));
+}
+
+#[test]
+fn rejects_invalid_vec_values_and_moves() {
+    for (source, diagnostic) in [
+        ("fn main() { let a = vec![]; }", "型別註記"),
+        ("fn main() { let a = Vec::new(); }", "型別註記"),
+        ("fn main() { let a = vec![1, true]; }", "型別不符"),
+        ("fn main() { let a: Vec<String> = Vec::new(); }", "元素"),
+        ("fn main() { let a = vec![1]; a.push(2); }", "可變"),
+        (
+            "fn main() { let mut a = vec![1]; a.push(true); }",
+            "型別不符",
+        ),
+        (
+            "fn main() { let a = vec![1]; let x = a[false]; }",
+            "型別不符",
+        ),
+        ("fn main() { let a = vec![1]; a[0] = 2; }", "不可變"),
+        (
+            "fn main() { let a = vec![1]; let moved = a; println!(\"{}\", a.len()); }",
+            "moved",
+        ),
+        (
+            "fn main() { let mut a = vec![1]; a = a; }",
+            "同一個 binding",
+        ),
+        ("fn main() { let mut a = vec![1]; a[0] += 1; }", "複合賦值"),
+        ("fn main() { let a = vec![1]; let x = a.first(); }", "方法"),
+        (
+            "fn main() { let a = vec![1.0]; println!(\"{:?}\", a); }",
+            "f64 collection",
+        ),
+        ("fn main() { println!(\"{:?}\", vec![1, 2]); }", "binding"),
+        ("fn main() {} fn take(a: Vec<i32>) {}", "函式參數"),
+        (
+            "fn main() {} fn make() -> Vec<i32> { vec![1] }",
+            "函式回傳值",
+        ),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
+    }
+}
+
 /// v0.7.0 僅接受明確列出的 String／token 解析流程與 powi(2)。
 #[test]
 fn accepts_limited_line_input_and_math() {
     for source in [
         include_str!("../examples/line_input.rs"),
+        "fn main() { let s = idwc::io::read_line(); let n = s.trim().parse::<i32>().unwrap(); println!(\"{}\", n); }",
+        "fn main() { let s: String = idwc::io::read_line(); let t: Vec<&str> = s.split_whitespace().collect(); println!(\"{}\", t.len()); }",
         "fn main() { let mut s: String = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let n: i32 = s.trim().parse::<i32>().unwrap(); println!(\"{}\", n); }",
         "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let t = s.trim().split_whitespace().collect::<Vec<&str>>(); let n = t[0].parse::<i32>().unwrap(); println!(\"{} {}\", n, t.len()); }",
         "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); { let t: Vec<&str> = s.split_whitespace().collect(); let n = t[0].parse::<f64>().unwrap(); println!(\"{}\", n); } std::io::stdin().read_line(&mut s).unwrap(); }",
@@ -712,6 +833,61 @@ fn accepts_limited_line_input_and_math() {
     ] {
         let result = transpile(source);
         assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn accepts_limited_string_values_and_output() {
+    for source in [
+        include_str!("../examples/strings.rs"),
+        r#"fn main() { let a = "123"; let b: &str = "def"; let c = String::from("value"); println!("-> {}{} {}", a, b, c); }"#,
+        r#"fn main() { let source = "hello"; let mut a = String::from(source); a = String::new(); a = String::from("again"); let b = a; println!("{}", b); }"#,
+        r#"fn main() { let mut a: &str = "first"; a = "second"; println!("{}", a); }"#,
+        "fn main() { let s = String::from(\"a\\0b\"); println!(\"{}\", s); }",
+        r#"fn main() { let s = String::from("x"); if true { let moved = s; println!("{}", moved); } else { println!("{}", s); } }"#,
+        r#"fn main() { let mut s = String::from("x"); let moved = s; if true { s = String::from("a"); } else { s = String::from("b"); } println!("{}", s); }"#,
+    ] {
+        let result = transpile(source);
+        assert!(result.is_ok(), "{source}: {result:?}");
+    }
+}
+
+#[test]
+fn rejects_invalid_string_values_and_moves() {
+    for (source, diagnostic) in [
+        (
+            "fn main() { let s = String::from(\"x\"); let moved = s; println!(\"{}\", s); }",
+            "moved",
+        ),
+        (
+            "fn main() { let s = String::from(\"x\"); let moved = s; let again = s; }",
+            "moved",
+        ),
+        (
+            "fn main() { let mut s = String::from(\"x\"); let tokens: Vec<&str> = s.split_whitespace().collect(); s = String::from(\"y\"); }",
+            "存活期間",
+        ),
+        (
+            "fn main() { let s = String::from(\"x\"); s = String::from(\"y\"); }",
+            "不可變",
+        ),
+        ("fn main() { let s = String::from(1); }", "型別不符"),
+        ("fn main() { let s = String::from(); }", "一個 &str"),
+        (
+            "fn main() { let s = String::from(\"x\", \"y\"); }",
+            "一個 &str",
+        ),
+        (
+            "fn main() { let mut s = String::from(\"x\"); s = s; }",
+            "同一個 binding",
+        ),
+        (
+            "fn main() { let mut s = String::from(\"x\"); let moved = s; if true { s = String::from(\"a\"); } println!(\"{}\", s); }",
+            "moved",
+        ),
+    ] {
+        let error = transpile(source).unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{source}: {error}");
     }
 }
 
@@ -731,6 +907,10 @@ fn rejects_line_input_semantic_errors() {
             "型別不符",
         ),
         ("fn main() { let s = String::new(1); }", "不接受引數"),
+        (
+            "fn main() { let s = idwc::io::read_line(1); }",
+            "不接受引數",
+        ),
     ] {
         let error = transpile(source).unwrap_err();
         assert!(
@@ -742,14 +922,27 @@ fn rejects_line_input_semantic_errors() {
 }
 
 #[test]
-fn rejects_string_vec_and_math_forms_outside_v0_8() {
+fn read_line_convenience_api_uses_each_generation_contract() {
+    let source = "fn main() { let input = idwc::io::read_line(); let n = input.trim().parse::<i32>().unwrap(); println!(\"{}\", n); }";
+
+    let strict = transpile(source).unwrap();
+    assert!(strict.contains("idwc_string idwc_v0 = {{0}, 0};"));
+    assert!(strict.contains("idwc_read_line(&idwc_v0);"));
+    assert!(strict.contains("idwc_validate_utf8"));
+
+    let relaxed = stupid(source);
+    assert!(relaxed.contains("char input[4097] = \"\";"));
+    assert!(relaxed.contains("fgets(input, sizeof(input), stdin);"));
+    assert!(!relaxed.contains("idwc_read_line"));
+}
+
+#[test]
+fn rejects_string_vec_and_math_forms_outside_v1_2_subset() {
     for source in [
-        "fn main() { let s = String::from(\"x\"); }",
         "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s); }",
         "fn main() { let mut s = String::new(); stdin().read_line(&mut s).unwrap(); }",
         "fn main() { let mut s = String::new(); std::io::stdin().read_line(s).unwrap(); }",
-        "fn main() { let s = String::new(); let other = s; }",
-        "fn main() { let mut s = String::new(); s = String::new(); }",
+        "fn main() { let s = String::from(\"x\"); let other = s.clone(); }",
         "fn main() { let s = String::new(); let t = s.split_whitespace().collect(); }",
         "fn main() { let s = String::new(); let t: Vec<i32> = s.split_whitespace().collect(); }",
         "fn main() { let s = String::new(); let t: Vec<&str> = s.split_whitespace(); }",

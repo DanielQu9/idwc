@@ -6,6 +6,29 @@ All notable changes to IdwC are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-21
+
+### Added
+
+- `idwc::io::read_line() -> String` for one-call bounded UTF-8 line input in
+  native Rust, strict generated C, and Stupid Mode.
+- `--string-capacity` / `--vec-capacity` CLI options and matching
+  `TranspileOptions` builders for generated stack capacities.
+- String-literal `&str` bindings and bounded owned `String` values with
+  `String::new`, `String::from`, assignment, local move checking, and `{}`
+  output.
+- Fixed-capacity `Vec<i32|usize|f64|bool>` values with `Vec::new`, both `vec!`
+  forms, `push`, indexing, `.len()`, assignment, and local move checking.
+- Limited `{:?}` output for `i32`, `usize`, and `bool` fixed arrays and Vecs,
+  lowered directly to generated C loops.
+- Strict Vec capacity and index failures with status 101, plus readable local
+  C array and length-variable output in Stupid Mode.
+
+### Changed
+
+- The default `Vec<&str>` token capacity is now 2048 elements, matching the
+  planned fixed-capacity Vec default.
+
 ## [1.1.1] - 2026-09-20
 
 ### Added

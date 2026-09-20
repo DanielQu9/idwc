@@ -25,13 +25,19 @@ idwc --stupid input.rs -o output.c
 - 只引入用到的 header。IdwC 不生成私有 runtime helper function 或 struct
   定義；Rust 原始碼本來定義的函式仍會成為一般 C 函式。
 - `i32`、`usize`、`f64`、`bool` 分別映射為 `int`、`size_t`、`double`、
-  `bool`；固定陣列使用區域 C array。
+  `bool`；固定陣列使用區域 C array。支援的 `Vec<T>` 會成為一個區域 C array
+  加上 `values_len` 之類的可讀 length 變數，不生成 Vec struct 或 helper。
+- 限定 collection `{:?}` 直接成為寫出方括號與分隔符的一般 C `for` loop；
+  共用的語意驗證仍會拒絕 `f64` collection Debug 格式。
 
 ## 刻意省略的保證
 
 Stupid Mode 直接生成 C 算術與索引，不檢查 signed overflow、負號 overflow、
 除數或餘數為零、`INT_MIN / -1`、unsigned wraparound、陣列邊界及 inclusive
 range overflow。選用此模式即接受這些情況可能造成 C undefined behavior。
+
+Vec capacity、`push` 與索引也不檢查。超過設定的區域 array 或越過 logical
+length 索引可能觸發 C undefined behavior。
 
 函式引數及其他直接 C expression 可能採用 C 求值順序，而不是 Rust 的由左
 至右順序。只有在合法 C 或避免明顯重複副作用所需時才保留 temporary。
@@ -46,7 +52,13 @@ compiler options 決定。
 - `read_i32()` 和 `read_f64()` 直接成為未檢查的 `%d`／`%lf` `scanf`；轉換
   失敗可能留下未初始化值。
 - `flush_stdout()` 直接呼叫 `fflush(stdout)`，不檢查結果。
-- 限定 `String` 輸入使用 4097-byte 區域 `char` array 與未檢查的 `fgets`。
+- 限定 `String` 輸入使用區域 `char` array；設定的 payload 容量（預設 4096）
+  之外多保留一個 NUL byte，並使用未檢查的 `fgets`。`idwc::io::read_line()`
+  會直接降低為空 array 加上一次這類呼叫。
+- Token collection 使用設定的 Vec 容量（預設 2048），且不檢查 overflow。
+- `&str` binding 直接成為 `char` pointer；owned String 使用區域 array，
+  `String::from`、賦值與 move 透過未檢查的 `strcpy`，`{}` 則使用 `%s`。
+  容量 overflow 與內嵌 NUL 行為因此依 C，而非 Strict Mode。
 - `split_whitespace()` 使用 `strtok`、ASCII whitespace，以及足以容納固定行
   buffer 內所有可能 token 的區域 pointer array；不保留 Unicode whitespace
   行為。

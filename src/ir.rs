@@ -30,6 +30,8 @@ pub(crate) enum Type {
     Bool,
     Unit,
     Array(ArrayElement, usize),
+    Vec(ArrayElement),
+    Str,
     String,
     Tokens,
 }
@@ -73,6 +75,15 @@ pub(crate) enum Statement {
         value: Expression,
         op: Option<BinaryOp>,
     },
+    VecAssignIndex {
+        id: usize,
+        index: Expression,
+        value: Expression,
+    },
+    VecPush {
+        id: usize,
+        value: Expression,
+    },
     Block(Vec<Statement>),
     /// 所有分支均為 unit 敘述；else if 表示為 else 分支中的 If。
     If {
@@ -113,7 +124,14 @@ pub(crate) enum Statement {
 /// print!／println! 格式已解析為文字與參數索引；文字不含 NUL。
 pub(crate) enum PrintPart {
     Text(String),
-    Argument { index: usize, precision: Option<u8> },
+    Argument { index: usize, format: PrintFormat },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrintFormat {
+    Display,
+    Precision(u8),
+    Debug,
 }
 
 /// 每個運算式皆帶有經語意分析確定的型別。
@@ -137,7 +155,18 @@ pub(crate) enum ExpressionKind {
         index: Box<Expression>,
     },
     ArrayLength(usize),
+    Vec(Vec<Expression>),
+    VecRepeat(Box<Expression>, usize),
+    VecNew,
+    VecIndex {
+        id: usize,
+        index: Box<Expression>,
+    },
+    VecLength(usize),
+    StringLiteral(String),
     StringNew,
+    StringFrom(Box<Expression>),
+    ReadString,
     ReadLine(usize),
     SplitWhitespace(usize),
     TokensLength(usize),

@@ -215,6 +215,7 @@ fn generated_c_matches_rust_output() {
         r#"fn main() { println!("line\
             continuation"); }"#,
         include_str!("../examples/variables.rs"),
+        include_str!("../examples/strings.rs"),
         r#"fn main() {
             let mut x: i32 = 7;
             x += 3; x -= 2; x *= 4; x /= 3; x %= 7;
@@ -345,6 +346,86 @@ fn fixed_arrays_match_rust_output() {
     }
 }
 
+#[test]
+fn fixed_capacity_vecs_match_rust_output() {
+    let cases = [
+        include_str!("../examples/vectors.rs"),
+        r#"fn main() {
+            let mut values = vec![mark(1), mark(2), mark(3)];
+            let repeated = vec![mark(4); 3];
+            values.push(mark(5));
+            values[index()] = mark(6);
+            println!("| {} {} {} {}", values.len(), values[1], values[3], repeated[2]);
+        }
+        fn mark(value: i32) -> i32 { print!("{} ", value); value }
+        fn index() -> usize { print!("i "); 1 }"#,
+        r#"fn main() {
+            let mut values: Vec<usize> = Vec::new();
+            values.push(values.len());
+            values.push(values.len());
+            let moved = values;
+            let mut replacement = vec![3usize; 2];
+            replacement = moved;
+            println!("{} {} {}", replacement.len(), replacement[0], replacement[1]);
+        }"#,
+        r#"fn main() {
+            let floats = vec![1.25, -0.0, 3.5];
+            let flags = vec![true, false, true];
+            let empty: Vec<i32> = vec![];
+            println!("{} {} {} {}", floats[0], floats[1], flags[2], empty.len());
+        }"#,
+        r#"fn main() {
+            let array = [1usize, 2, 3];
+            let values = vec![true, false, true];
+            println!("{} array={:?} values={:?}", mark(7), array, values);
+        }
+        fn mark(value: i32) -> i32 { print!("mark "); value }"#,
+    ];
+    let dir = TestDir::new();
+    for source in cases {
+        let (rust, c) = compile_pair(&dir, source);
+        let rust = run_with_input(&rust, b"");
+        let c = run_with_input(&c, b"");
+        assert!(rust.status.success(), "{source}");
+        assert_same_output(&rust, &c);
+    }
+}
+
+#[test]
+fn vec_bounds_and_capacity_fail_without_undefined_behavior() {
+    let dir = TestDir::new();
+
+    let bounds_source = r#"fn main() {
+        let values = vec![10, 20, 30];
+        println!("before");
+        println!("{}", values[out_of_bounds()]);
+    }
+    fn out_of_bounds() -> usize { 3 }"#;
+    let (rust, c) = compile_pair(&dir, bounds_source);
+    let rust = run_with_input(&rust, b"");
+    let c = run_with_input(&c, b"");
+    assert_eq!(rust.status.code(), Some(101));
+    assert_eq!(c.status.code(), Some(101));
+    assert_eq!(c.stdout, b"before\n");
+    assert_eq!(c.stderr, b"idwc: Vec index out of bounds\n");
+
+    let capacity_source =
+        "fn main() { let mut values = vec![1, 2]; println!(\"before\"); values.push(3); }";
+    let c_source = dir.file("capacity.c");
+    let c_binary = dir.file("capacity");
+    let generated = idwc::transpile_with_options(
+        capacity_source,
+        idwc::TranspileOptions::default().with_vec_capacity(2),
+    )
+    .unwrap();
+    fs::write(&c_source, generated).unwrap();
+    compile_c(&c_source, &c_binary);
+    let c = run_with_input(&c_binary, b"");
+    assert_eq!(c.status.code(), Some(101));
+    assert_eq!(c.stdout, b"before\n");
+    assert_eq!(c.stderr, b"idwc: Vec capacity exceeded\n");
+}
+
 /// 動態越界必須在存取前停止，且 C 端不得觸發未定義行為。
 #[test]
 fn array_bounds_fail_without_undefined_behavior() {
@@ -398,6 +479,32 @@ fn line_input_parsing_and_powi_match_rust() {
         (
             include_str!("../examples/line_input.rs"),
             "70\u{2003}1.75\n",
+        ),
+        (
+            r#"fn main() {
+                let input = idwc::io::read_line();
+                let value = input.trim().parse::<i32>().unwrap();
+                println!("{}", value);
+            }"#,
+            "\u{00a0}-42\u{3000}\n",
+        ),
+        (
+            r#"fn main() {
+                let first = idwc::io::read_line();
+                let second: String = idwc::io::read_line();
+                let first_values: Vec<&str> = first.split_whitespace().collect();
+                let second_values: Vec<&str> = second.split_whitespace().collect();
+                println!("{} {}", first_values.len(), second_values.len());
+            }"#,
+            "1 2\n3 4 5\n",
+        ),
+        (
+            r#"fn main() {
+                let input = idwc::io::read_line();
+                let values: Vec<&str> = input.split_whitespace().collect();
+                println!("{}", values.len());
+            }"#,
+            "",
         ),
         (
             r#"fn main() {
@@ -525,6 +632,34 @@ fn line_input_failures_are_controlled() {
     assert_eq!(c_io_error.stdout, rust_io_error.stdout);
     assert_eq!(c_io_error.stderr, b"idwc: stdin I/O error\n");
 
+    let convenience_source = r#"fn main() {
+        let input = idwc::io::read_line();
+        let values: Vec<&str> = input.split_whitespace().collect();
+        println!("{}", values.len());
+    }"#;
+    let (rust, c) = compile_pair(&dir, convenience_source);
+    let rust_output = run_with_input(&rust, b"\xff\n");
+    let c_output = run_with_input(&c, b"\xff\n");
+    assert_eq!(rust_output.status.code(), Some(101));
+    assert_eq!(c_output.status.code(), Some(101));
+    assert_eq!(c_output.stdout, rust_output.stdout);
+    assert_eq!(c_output.stderr, b"idwc: invalid UTF-8 input\n");
+
+    let over_limit_input = vec![b'a'; 4097];
+    let rust_output = run_with_input(&rust, &over_limit_input);
+    let c_output = run_with_input(&c, &over_limit_input);
+    assert_eq!(rust_output.status.code(), Some(101));
+    assert_eq!(c_output.status.code(), Some(101));
+    assert_eq!(c_output.stdout, rust_output.stdout);
+    assert_eq!(c_output.stderr, b"idwc: input line buffer too long\n");
+
+    let rust_io_error = run_directory(&rust);
+    let c_io_error = run_directory(&c);
+    assert_eq!(rust_io_error.status.code(), Some(101));
+    assert_eq!(c_io_error.status.code(), Some(101));
+    assert_eq!(c_io_error.stdout, rust_io_error.stdout);
+    assert_eq!(c_io_error.stderr, b"idwc: stdin I/O error\n");
+
     let token_source = r#"fn main() {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
@@ -532,14 +667,10 @@ fn line_input_failures_are_controlled() {
         println!("{}", values.len());
     }"#;
     let (_, c) = compile_pair(&dir, token_source);
-    let input_256 = vec!["1"; 256].join(" ");
-    let output = run_with_input(&c, input_256.as_bytes());
+    let input_2048 = vec!["1"; 2048].join(" ");
+    let output = run_with_input(&c, input_2048.as_bytes());
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"256\n");
-    let input_257 = vec!["1"; 257].join(" ");
-    let output = run_with_input(&c, input_257.as_bytes());
-    assert_eq!(output.status.code(), Some(101));
-    assert_eq!(output.stderr, b"idwc: too many input tokens\n");
+    assert_eq!(output.stdout, b"2048\n");
 }
 
 /// 比較控制流程的輸出、scope、短路條件與巢狀 break／continue。
@@ -963,10 +1094,12 @@ fn cli_checks_arguments_and_provides_help() {
     assert!(help.contains("省略時使用輸入檔名並改為 .c"));
     assert!(help.contains("-s, --stupid"));
     assert!(help.contains("放棄部分嚴格語意保證"));
+    assert!(help.contains("--string-capacity <B>"));
+    assert!(help.contains("--vec-capacity <N>"));
     let short_help = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("-h"));
     assert_eq!(String::from_utf8_lossy(&short_help.stdout), help);
     let version = successful(Command::new(env!("CARGO_BIN_EXE_idwc")).arg("--version"));
-    assert_eq!(version.stdout, b"idwc 1.1.1\n");
+    assert_eq!(version.stdout, b"idwc 1.2.0\n");
     for args in [
         vec![],
         vec!["input.rs", "-o"],
@@ -977,6 +1110,20 @@ fn cli_checks_arguments_and_provides_help() {
         vec!["--help", "extra"],
         vec!["--version", "extra"],
         vec!["--stupid", "--stupid", "input.rs", "-o", "output.c"],
+        vec!["--string-capacity", "0", "input.rs"],
+        vec!["--string-capacity", "65537", "input.rs"],
+        vec!["--string-capacity", "many", "input.rs"],
+        vec![
+            "--string-capacity",
+            "8",
+            "--string-capacity",
+            "9",
+            "input.rs",
+        ],
+        vec!["--vec-capacity", "0", "input.rs"],
+        vec!["--vec-capacity", "65537", "input.rs"],
+        vec!["--vec-capacity", "many", "input.rs"],
+        vec!["--vec-capacity", "3", "--vec-capacity", "4", "input.rs"],
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_idwc"))
             .args(&args)
@@ -985,6 +1132,67 @@ fn cli_checks_arguments_and_provides_help() {
         assert!(!result.status.success(), "應拒絕參數：{args:?}");
         assert!(!result.stderr.is_empty());
     }
+}
+
+#[test]
+fn cli_applies_collection_capacities() {
+    let dir = TestDir::new();
+    let input = dir.file("line.rs");
+    let output = dir.file("line.c");
+    fs::write(
+        &input,
+        "fn main() { let input = idwc::io::read_line(); let values: Vec<&str> = input.split_whitespace().collect(); println!(\"{}\", values.len()); }",
+    )
+    .unwrap();
+    successful(
+        Command::new(env!("CARGO_BIN_EXE_idwc"))
+            .args(["--string-capacity", "8", "--vec-capacity", "3"])
+            .arg(&input)
+            .arg("-o")
+            .arg(&output),
+    );
+    let generated = fs::read_to_string(&output).unwrap();
+    assert!(generated.contains("#define IDWC_LINE_LIMIT ((size_t)8)"));
+    assert!(generated.contains("#define IDWC_TOKEN_LIMIT ((size_t)3)"));
+
+    let executable = dir.file("line");
+    compile_c(&output, &executable);
+    let accepted = run_with_input(&executable, b"a b c\n");
+    assert!(accepted.status.success());
+    assert_eq!(accepted.stdout, b"3\n");
+    let rejected = run_with_input(&executable, b"a b c d\n");
+    assert_eq!(rejected.status.code(), Some(101));
+    assert_eq!(rejected.stderr, b"idwc: too many input tokens\n");
+}
+
+#[test]
+fn string_capacity_overflow_is_controlled() {
+    let dir = TestDir::new();
+    let c_source = dir.file("string.c");
+    let executable = dir.file("string");
+    let options = idwc::TranspileOptions::default().with_string_capacity(8);
+
+    let accepted = idwc::transpile_with_options(
+        "fn main() { let value = String::from(\"12345678\"); println!(\"{}\", value); }",
+        options,
+    )
+    .unwrap();
+    fs::write(&c_source, accepted).unwrap();
+    compile_c(&c_source, &executable);
+    let output = run_with_timeout(&mut Command::new(&executable));
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"12345678\n");
+
+    let rejected = idwc::transpile_with_options(
+        "fn main() { let value = String::from(\"123456789\"); println!(\"{}\", value); }",
+        options,
+    )
+    .unwrap();
+    fs::write(&c_source, rejected).unwrap();
+    compile_c(&c_source, &executable);
+    let output = run_with_timeout(&mut Command::new(&executable));
+    assert_eq!(output.status.code(), Some(101));
+    assert_eq!(output.stderr, b"idwc: String capacity exceeded\n");
 }
 
 /// CLI Stupid Mode should emit readable standalone C and a visible semantic warning.
@@ -1046,6 +1254,8 @@ fn stupid_mode_examples_compile() {
         ("arrays", include_str!("../examples/arrays.rs")),
         ("line_input", include_str!("../examples/line_input.rs")),
         ("ranges", include_str!("../examples/ranges.rs")),
+        ("strings", include_str!("../examples/strings.rs")),
+        ("vectors", include_str!("../examples/vectors.rs")),
         ("stupid_stdin", include_str!("../examples/stupid_stdin.rs")),
     ] {
         let c_source = dir.file(&format!("{name}.c"));

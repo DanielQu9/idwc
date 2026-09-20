@@ -2,3 +2,4 @@
 .DS_store
 *.out
 scripts/*
+!scripts/release-check.sh

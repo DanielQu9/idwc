@@ -79,7 +79,7 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 
 ## 里程碑
 
-目前版本為 **v1.1.1**。
+目前版本為 **v1.2.0**。
 
 | 版本 | 目標 | 狀態 |
 | --- | --- | --- |
@@ -95,16 +95,17 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 | v1.0.0 | 凍結嚴格 Rust 子集與穩定文件 | 已完成 |
 | v1.1.0 | 可選的 Stupid Mode：寬鬆、可讀的 C | 已完成 |
 | v1.1.1 | 完整 CLI 說明與可省略的 `-o` 輸出路徑 | 已完成 |
-| v1.2.0 | 限定字串、固定容量 `Vec` 與 collection 輸出 | 規劃中 |
+| v1.2.0 | 限定字串、固定容量 `Vec` 與 collection 輸出 | 已完成 |
 
-v1.2.0 規劃加入綁定字串字面量的 `&str`、有容量上限的 owned `String`
-以及支援既有純量型別的固定容量 `Vec<T>` 子集。Vec 範圍包含 `vec!`、建立、
-`push`、索引、`.len()`、賦值／move，以及 Vec 與固定陣列專用的 `{:?}`
-輸出。此格式會直接降低為 C 迴圈，不會實作 Rust 的一般 `Debug` trait 系統。
-`idwc::io::read_line() -> String` 會提供將一整行 UTF-8 文字讀入 bounded
-String 的簡潔介面。規劃中的轉譯參數會分別以 bytes 設定 String 容量、以
-elements 設定 Vec 容量。這些功能不會宣稱支援一般 Rust reference、heap
-allocation、slice、iterator，或完整的 `String`、`Vec`、`Debug` API。
+v1.2.0 支援綁定字串字面量的 `&str`、有容量上限的 owned `String`、
+`idwc::io::read_line() -> String`，以及使用既有純量型別的固定容量 `Vec<T>`。
+Vec 子集包含 `Vec::new()`、兩種 `vec!`、`push`、索引、`.len()`、賦值與
+local move。`i32`、`usize`、`bool` 的 Vec 與固定陣列可用專用 `{:?}` 輸出，
+並直接降低為 C 迴圈；`f64` collection 會先拒絕，直到能符合 Rust Debug
+格式。`--string-capacity` 與 `--vec-capacity` 用來設定生成的 stack storage。
+這不代表支援一般 Rust reference、heap allocation、slice、iterator，或完整
+`String`、`Vec`、`Debug` API。看來「就用陣列啊」只要碰上 Rust 語意，也能
+膨脹成一份設計文件。
 
 ## 環境需求
 
@@ -166,6 +167,12 @@ idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
 寫入，再以原子 rename 取代輸出，因此轉譯失敗或部分寫入失敗不會截斷既有
 C 檔案。
 
+bounded String 預設容納 4096 payload bytes，固定容量 Vec 預設容納 2048 個
+elements。每次轉譯可用 `--string-capacity <bytes>` 與
+`--vec-capacity <elements>` 調整，兩者皆須介於 1 到 65536。這些設定會改變
+生成的 stack object 大小；容量很大或同時存在很多 collection 時會增加 stack
+用量。
+
 ### 整數 range 範例
 
 ```rust
@@ -202,30 +209,38 @@ printf '70 1.75\n' | /tmp/idwc-line-input
 # Enter weight (kg) and height (m): BMI = 22.86, below 25 = true
 ```
 
-其他範例涵蓋變數、控制流程、函式與型別化 stdin、浮點及固定陣列。每個
-提交的 `examples/*.c` 都是由相對應 Rust 原始碼產生的 golden output，並由
-測試確認內容一致。
+其他範例涵蓋變數、控制流程、函式與型別化 stdin、浮點、固定陣列、字串及
+固定容量 Vec。每個提交的 `examples/*.c` 都是由相對應 Rust 原始碼產生的
+golden output，並由測試確認內容一致。
 
 ## 目前子集概覽
 
 - 恰好一個 private `fn main()`，不可有參數或顯式回傳型別。
 - private 輔助函式可使用 scalar 參數，以及 scalar 或 unit 回傳；支援向前
   呼叫與遞迴。
-- `i32`、限定 `usize`、`f64`、`bool` 與一維固定陣列。
+- `i32`、限定 `usize`、`f64`、`bool`、一維固定陣列、bounded String 與
+  固定容量 scalar Vec。
 - 初始化的 `let`／`let mut`、賦值、shadowing 與詞法區塊。
 - 檢查式算術、比較、布林運算及短路求值。
 - statement 形式的 `if`／`else if`／`else`、`while`、`loop` 和整數 range
   `for`，以及無 label 的 `break`／`continue`。
 - `[T; N]`、陣列字面量、repeat 初始化、值複製、`.len()` 和經檢查的
   `usize` 索引。
+- `T = i32 | usize | f64 | bool` 的 `Vec<T>`，支援 `Vec::new()`、
+  `vec![...]`、`vec![value; N]`、`push`、`.len()`、檢查式索引、賦值與 move。
 - `print!`／`println!`，包含無參數形式、依序 `{}` placeholder，以及 f64
-  的 `{:.0}` 到 `{:.18}`。
-- `idwc::io::read_i32()`、`read_f64()` 和 `flush_stdout()`。
+  的 `{:.0}` 到 `{:.18}`，另可用限定 `{:?}` 輸出 `i32`、`usize`、`bool`
+  陣列與 Vec。
+- `idwc::io::read_i32()`、`read_f64()`、`read_line()` 和 `flush_stdout()`。
 - 限定的 `String::new()` → `read_line(...).unwrap()` → `trim()`／
   `split_whitespace()` → `parse::<i32|f64>().unwrap()` 輸入流程。
+- `idwc::io::read_line()` 可用較短寫法建立並填入一個 bounded `String`；它會
+  保留換行，若一開始就是 EOF 則回傳空 String。
+- 可綁定字串字面量的 `&str`，以及 bounded `String::new()`／
+  `String::from(&str)`、賦值、move 檢查與 `{}` 輸出。
 - `f64` 的 `powi(2)` 方法。
 
-主要未支援項目包含一般 String／Vec 操作、字串串接、slice、struct、enum、
+主要未支援項目包含未列出的 String／Vec 操作、字串串接、clone、slice、struct、enum、
 cast、`f32`、其他整數型別、一般 iterator、closure、`match`、async、unsafe、
 pointer、泛型、trait、任意 macro、完整 `std`，以及輸入程式的 Cargo 依賴。
 

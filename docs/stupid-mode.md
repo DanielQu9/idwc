@@ -28,7 +28,12 @@ Rust-equivalent runtime behavior.
   function or struct definition. Functions present in the Rust source remain
   ordinary C functions.
 - `i32`, `usize`, `f64`, and `bool` map to `int`, `size_t`, `double`, and
-  `bool`. Fixed arrays remain local C arrays.
+  `bool`. Fixed arrays remain local C arrays. A supported `Vec<T>` becomes one
+  local C array plus a readable length variable such as `values_len`; no Vec
+  struct or helper function is emitted.
+- Limited collection `{:?}` output becomes an ordinary C `for` loop that writes
+  brackets and separators. The shared semantic validator still rejects `f64`
+  collection Debug formatting.
 
 ## Deliberately omitted guarantees
 
@@ -36,6 +41,10 @@ Stupid Mode emits direct C arithmetic and indexing. It does not check signed
 overflow, negation overflow, division or remainder by zero, the `INT_MIN / -1`
 case, unsigned wraparound, array bounds, or inclusive-range overflow. Any
 resulting C undefined behavior is part of selecting this mode.
+
+Vec capacity, `push`, and indexing are likewise unchecked. Exceeding the
+configured local array or indexing past the logical length can invoke C
+undefined behavior.
 
 Function arguments and other direct C expressions may follow C evaluation
 order instead of Rust left-to-right order. A temporary is retained only when
@@ -52,8 +61,16 @@ precision follow the C implementation and compiler options.
 - `read_i32()` and `read_f64()` become unchecked `%d` and `%lf` `scanf` calls.
   A failed conversion can leave an uninitialized value.
 - `flush_stdout()` becomes a direct `fflush(stdout)` call with no result check.
-- The limited `String` input path uses a 4097-byte local `char` array and
-  unchecked `fgets`.
+- The limited `String` input path uses a local `char` array with one NUL byte
+  beyond the configured payload capacity (4096 by default) and unchecked
+  `fgets`. `idwc::io::read_line()` lowers directly to an empty array followed
+  by one such call.
+- Token collections use the configured Vec capacity (2048 by default) without
+  an overflow check.
+- `&str` bindings become `char` pointers. Owned String values become local
+  arrays; `String::from`, assignment, and moves use unchecked `strcpy`, while
+  `{}` output uses `%s`. Capacity overflow and embedded NUL behavior therefore
+  follow C rather than strict mode.
 - `split_whitespace()` uses `strtok` with ASCII whitespace and a local pointer
   array sized for every possible token in the fixed line buffer. Unicode
   whitespace behavior is not preserved.
