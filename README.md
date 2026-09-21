@@ -100,11 +100,12 @@ The current version is **v1.2.1**.
 | v1.1.1 | Detailed CLI help and optional `-o` output path | Completed |
 | v1.2.0 | Limited strings, fixed-capacity `Vec`, and collection output | Completed |
 | v1.2.1 | Stupid Mode string and Vec cleanup | Completed |
-| v1.3.0 | Collection ergonomics and additional collection output | Planned |
-| v1.4.0 | Bounded String editing | Planned |
-| v1.5.0 | Eager array and Vec `.map` translation | Planned |
-| v1.6.0 | Short iterator pipelines and reductions | Planned |
-| v1.7.0 | Limited pattern-based control flow | Planned |
+| v1.3.0 | clap-managed CLI and locale-aware English/Chinese output | Planned |
+| v1.4.0 | Collection ergonomics and additional collection output | Planned |
+| v1.5.0 | Bounded String editing | Planned |
+| v1.6.0 | Eager array and Vec `.map` translation | Planned |
+| v1.7.0 | Short iterator pipelines and reductions | Planned |
+| v1.8.0 | Limited pattern-based control flow | Planned |
 
 The v1.2 line supports string-literal `&str` bindings, bounded owned `String` values,
 `idwc::io::read_line() -> String`, and fixed-capacity `Vec<T>` for the supported
@@ -117,17 +118,43 @@ This does not provide general references, heap allocation, slices, iterators,
 or the complete `String`, `Vec`, and `Debug` APIs. Apparently "just use an
 array" becomes a design document when Rust semantics are invited to the party.
 
-The planned v1.3.0 collection pass will target `&str` fixed arrays,
+### CLI and language roadmap
+
+v1.3.0 will replace the handwritten argument parser with
+[clap](https://github.com/clap-rs/clap) while preserving the current flags,
+optional output path, capacity validation, and atomic file replacement. clap
+will own argument relationships, duplicate detection, values, help, and version
+handling. The current standard-library parser proves that an extra dependency
+is not strictly necessary; clap is justified here because every future option
+would otherwise duplicate parsing, usage, and error-reporting logic.
+
+The CLI will select its response language before rendering help or errors.
+`IDWC_LANG` provides a deterministic override for users and tests; otherwise the
+lookup order is `LC_ALL`, `LC_MESSAGES`, then `LANG`. A normalized locale that
+starts with `zh` selects Traditional Chinese, while every other, missing,
+invalid, `C`, or `POSIX` locale selects English. Locale detection changes only
+IdwC messages and never the generated program's numeric or C locale behavior.
+
+This applies to help, argument errors, file I/O errors, Stupid Mode warnings,
+and translation diagnostics. Because clap does not yet provide complete runtime
+localization, IdwC will use `try_get_matches_from` and its own small bilingual
+renderer instead of allowing clap to exit with fixed English text. Translation
+errors will carry a stable diagnostic key and structured values so the CLI can
+choose text without parsing an existing message. The library API remains
+deterministic and does not inspect process locale; its existing 1.x diagnostic
+accessors remain compatible.
+
+The planned v1.4.0 collection pass will target `&str` fixed arrays,
 Rust-compatible `{:?}` output for `f64` collections, and by-value `for` loops
 over supported fixed arrays and Vecs. This directly covers common parallel-array
 programs such as a `&str` name array paired with an `f64` score array.
 
-v1.4.0 will then add a small, capacity-checked editing API for bounded String,
+v1.5.0 will then add a small, capacity-checked editing API for bounded String,
 starting with `.len()`, `.is_empty()`, `.clear()`, and `.push_str()`.
 
 ### Modern Rust lowering roadmap
 
-v1.5.0 is reserved for eager `.map` translation. Fixed arrays will accept the
+v1.6.0 is reserved for eager `.map` translation. Fixed arrays will accept the
 real Rust form `values.map(|value| expression)`. Vecs will use a real iterator
 form such as `values.into_iter().map(|value| expression).collect()`, rather than
 an IdwC-only `Vec::map` invention. Both forms lower directly to an indexed C
@@ -136,14 +163,14 @@ checked operations inside the closure body; Stupid Mode emits the readable
 operators directly. Initial closures are expression-only and may capture
 already-supported scalar bindings.
 
-v1.6.0 will build short, statically understood pipelines on that machinery.
+v1.7.0 will build short, statically understood pipelines on that machinery.
 The targets are limited `.filter`, `.enumerate`, `.zip`, `.fold`, `.sum`,
 `.any`, and `.all` forms over supported arrays and Vecs. IdwC will fuse a safe
 pipeline into ordinary loops where practical, with early exit for `.any` and
 `.all`; it will not construct a general iterator runtime or heap-allocated
 intermediate collections.
 
-v1.7.0 will target the control-flow sugar needed to make those APIs pleasant:
+v1.8.0 will target the control-flow sugar needed to make those APIs pleasant:
 small tuple destructuring plus limited `match`, `if let`, and `while let` over
 well-defined scalar and collection results. General patterns, references,
 closures as stored values, and the complete `Iterator` API remain outside this

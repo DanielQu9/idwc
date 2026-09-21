@@ -97,11 +97,12 @@ binary64 行為都是正式保證。不支援的語法會明確拒絕，不會�
 | v1.1.1 | 完整 CLI 說明與可省略的 `-o` 輸出路徑 | 已完成 |
 | v1.2.0 | 限定字串、固定容量 `Vec` 與 collection 輸出 | 已完成 |
 | v1.2.1 | Stupid Mode 的字串與 Vec 輸出整理 | 已完成 |
-| v1.3.0 | Collection 易用性與更多 collection 輸出 | 已規劃 |
-| v1.4.0 | Bounded String 編輯 | 已規劃 |
-| v1.5.0 | Eager 陣列與 Vec `.map` 翻譯 | 已規劃 |
-| v1.6.0 | 短 iterator pipeline 與 reduction | 已規劃 |
-| v1.7.0 | 限定的 pattern-based control flow | 已規劃 |
+| v1.3.0 | clap 管理 CLI 與依 locale 選擇中英文輸出 | 已規劃 |
+| v1.4.0 | Collection 易用性與更多 collection 輸出 | 已規劃 |
+| v1.5.0 | Bounded String 編輯 | 已規劃 |
+| v1.6.0 | Eager 陣列與 Vec `.map` 翻譯 | 已規劃 |
+| v1.7.0 | 短 iterator pipeline 與 reduction | 已規劃 |
+| v1.8.0 | 限定的 pattern-based control flow | 已規劃 |
 
 v1.2 系列支援綁定字串字面量的 `&str`、有容量上限的 owned `String`、
 `idwc::io::read_line() -> String`，以及使用既有純量型別的固定容量 `Vec<T>`。
@@ -113,16 +114,37 @@ local move。`i32`、`usize`、`bool` 的 Vec 與固定陣列可用專用 `{:?}`
 `String`、`Vec`、`Debug` API。看來「就用陣列啊」只要碰上 Rust 語意，也能
 膨脹成一份設計文件。
 
-預定的 v1.3.0 collection 補強會以固定 `&str` 陣列、符合 Rust 的 `f64`
+### CLI 與語言規劃
+
+v1.3.0 會以 [clap](https://github.com/clap-rs/clap) 取代手寫參數 parser，並
+保留目前所有 flag、可省略的輸出路徑、容量驗證及原子檔案替換。參數關係、
+重複選項、值、help 與 version 將交由 clap 管理。目前的標準函式庫 parser
+證明第三方 dependency 並非絕對必要；採用 clap 的理由是避免每個新選項都
+重複實作 parsing、usage 與錯誤回報。
+
+CLI 會在產生 help 或錯誤前決定回應語言。`IDWC_LANG` 提供使用者與測試可重現
+的明確 override；否則依序檢查 `LC_ALL`、`LC_MESSAGES`、`LANG`。正規化後以
+`zh` 開頭的 locale 使用繁體中文，其餘、缺少、無效、`C` 或 `POSIX` locale
+一律使用英文。Locale 偵測只影響 IdwC 訊息，不會改變生成程式的數字或 C
+locale 行為。
+
+本地化範圍包含 help、參數錯誤、檔案 I/O 錯誤、Stupid Mode warning 與轉譯
+診斷。由於 clap 目前沒有完整的 runtime localization，IdwC 會使用
+`try_get_matches_from` 加上一層小型雙語 renderer，而不讓 clap 直接以固定英文
+退出。轉譯錯誤會攜帶穩定 diagnostic key 與結構化值，讓 CLI 不必解析既有
+訊息即可選擇文字。Library API 不讀取 process locale，維持 deterministic；
+現有 1.x diagnostic accessor 也會保持相容。
+
+預定的 v1.4.0 collection 補強會以固定 `&str` 陣列、符合 Rust 的 `f64`
 collection `{:?}` 輸出，以及對支援陣列與 Vec 的 by-value `for` 迴圈為目標。
 這會直接涵蓋 `&str` 姓名陣列搭配 `f64` 成績陣列等常見的平行陣列程式。
 
-接著 v1.4.0 會為 bounded String 加入一小組具容量檢查的編輯 API，先從
+接著 v1.5.0 會為 bounded String 加入一小組具容量檢查的編輯 API，先從
 `.len()`、`.is_empty()`、`.clear()` 與 `.push_str()` 開始。
 
 ### 現代 Rust 語法降低計畫
 
-v1.5.0 保留給 eager `.map` 翻譯。固定陣列會接受真正的 Rust 寫法
+v1.6.0 保留給 eager `.map` 翻譯。固定陣列會接受真正的 Rust 寫法
 `values.map(|value| expression)`；Vec 則使用
 `values.into_iter().map(|value| expression).collect()` 這類真正的 iterator
 寫法，而不發明只有 IdwC 能理解的 `Vec::map`。兩者都會直接降低成 indexed C
@@ -130,12 +152,12 @@ v1.5.0 保留給 eager `.map` 翻譯。固定陣列會接受真正的 Rust 寫�
 內容中的檢查式運算，Stupid Mode 則直接生成易讀運算子。第一階段只接受
 expression-only closure，並可捕捉目前已支援的 scalar binding。
 
-v1.6.0 會在這套機制上加入短且能靜態理解的 pipeline，目標包含陣列與 Vec
+v1.7.0 會在這套機制上加入短且能靜態理解的 pipeline，目標包含陣列與 Vec
 的限定 `.filter`、`.enumerate`、`.zip`、`.fold`、`.sum`、`.any` 與 `.all`。
 IdwC 會在可行時把安全的 pipeline 融合成一般迴圈，`.any` 與 `.all` 則使用
 提早退出；不會建立一般 iterator runtime 或 heap intermediate collection。
 
-v1.7.0 會補上讓這些 API 更好用的 control-flow sugar：小型 tuple destructuring，
+v1.8.0 會補上讓這些 API 更好用的 control-flow sugar：小型 tuple destructuring，
 以及針對定義明確的 scalar／collection 結果所提供的限定 `match`、`if let` 與
 `while let`。一般 pattern、reference、作為儲存值的 closure 和完整
 `Iterator` API 仍不在這份計畫內。Rust 負責看起來現代，C 負責老實跑迴圈。
