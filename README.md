@@ -208,10 +208,11 @@ cargo build --release --locked
 
 ## Quick start
 
-Translate and compile Hello World with the installed CLI:
+For most classroom programs and human-edited generated C, we recommend using
+Stupid Mode (`-s`). It produces simpler, more readable C:
 
 ```bash
-idwc examples/hello.rs -o /tmp/idwc-hello.c
+idwc -s examples/hello.rs -o /tmp/idwc-hello.c
 clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 /tmp/idwc-hello
 # Hello, World!
@@ -220,17 +221,17 @@ clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 From a source checkout, the same translation can be run without installation:
 
 ```bash
-cargo run -- examples/hello.rs -o /tmp/idwc-hello.c
+cargo run -- -s examples/hello.rs -o /tmp/idwc-hello.c
 ```
 
-Generate deliberately relaxed, human-readable C with Stupid Mode:
+Use the default Strict Mode instead when you need IdwC's checked runtime
+behavior and the documented Rust-subset semantic guarantees; omit `-s`:
 
 ```bash
-idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
-# Short form: idwc -s examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+idwc examples/hello.rs -o /tmp/idwc-hello-strict.c
 ```
 
-The command writes a warning to stderr because the result intentionally omits
+Stupid Mode writes a warning to stderr because the result intentionally omits
 strict runtime checks. Its v1.2 collection output keeps simple Vec writes
 direct, uses temporaries only where expression side effects require them, and
 emits `(void)` warning suppressions only for Vec storage or lengths that are not

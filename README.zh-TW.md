@@ -193,10 +193,11 @@ cargo build --release --locked
 
 ## 快速開始
 
-使用已安裝的 CLI 轉譯並編譯 Hello World：
+對多數課堂程式，以及預計由人直接閱讀或修改的生成 C，建議使用 Stupid
+Mode（`-s`）。它會產生較簡潔、易讀的 C：
 
 ```bash
-idwc examples/hello.rs -o /tmp/idwc-hello.c
+idwc -s examples/hello.rs -o /tmp/idwc-hello.c
 clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 /tmp/idwc-hello
 # Hello, World!
@@ -205,17 +206,17 @@ clang -std=c17 /tmp/idwc-hello.c -o /tmp/idwc-hello
 在原始碼 checkout 中，也能不安裝而透過 Cargo 執行相同轉譯：
 
 ```bash
-cargo run -- examples/hello.rs -o /tmp/idwc-hello.c
+cargo run -- -s examples/hello.rs -o /tmp/idwc-hello.c
 ```
 
-使用 Stupid Mode 產生刻意寬鬆、適合人類閱讀的 C：
+若需要 IdwC 的受檢查 runtime 行為，以及文件承諾的 Rust 子集語意保證，則
+應使用預設的 Strict Mode，也就是省略 `-s`：
 
 ```bash
-idwc --stupid examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
-# 短選項：idwc -s examples/stupid_stdin.rs -o /tmp/idwc-stupid-stdin.c
+idwc examples/hello.rs -o /tmp/idwc-hello-strict.c
 ```
 
-此命令會在 stderr 顯示提示，因為輸出刻意省略嚴格 runtime 檢查。完整規則
+Stupid Mode 會在 stderr 顯示提示，因為輸出刻意省略嚴格 runtime 檢查。完整規則
 中，v1.2 collection 的簡單 Vec 寫入會保持直接，只有 expression 副作用需要
 時才建立 temporary；只有後續未讀取的 Vec storage 或 length 才生成 `(void)`
 warning suppression。完整規則請見 [Stupid Mode 規格](docs/stupid-mode.zh-TW.md)。
